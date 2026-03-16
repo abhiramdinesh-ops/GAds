@@ -71,7 +71,7 @@ def get_ads_client(mcc):
         "refresh_token":     creds.refresh_token,
         "login_customer_id": mcc,
         "use_proto_plus":    True,
-        "api_version":       "v14"
+        "api_version":       "v19"
     }
     return GoogleAdsClient.load_from_dict(config)
 
