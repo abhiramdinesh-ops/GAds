@@ -1,4 +1,4 @@
-google-ads==24.1.0
+google-ads==21.3.0
 google-auth==2.29.0
 google-auth-oauthlib==1.2.0
 gspread==6.1.2
