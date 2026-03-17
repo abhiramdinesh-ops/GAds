@@ -6,11 +6,18 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from datetime import datetime, timedelta
 
-CLIENT_ID       = os.environ["CLIENT_ID"]
-CLIENT_SECRET   = os.environ["CLIENT_SECRET"]
-REFRESH_TOKEN   = os.environ["REFRESH_TOKEN"]
-DEVELOPER_TOKEN = os.environ["DEVELOPER_TOKEN"]
-SHEET_ID        = os.environ["SHEET_ID"]
+# Google Ads credentials (115251666473 client)
+ADS_CLIENT_ID       = os.environ["ADS_CLIENT_ID"]
+ADS_CLIENT_SECRET   = os.environ["ADS_CLIENT_SECRET"]
+ADS_REFRESH_TOKEN   = os.environ["ADS_REFRESH_TOKEN"]
+DEVELOPER_TOKEN     = os.environ["DEVELOPER_TOKEN"]
+
+# Google Sheets credentials (770621812681 client)
+SHEETS_CLIENT_ID     = os.environ["SHEETS_CLIENT_ID"]
+SHEETS_CLIENT_SECRET = os.environ["SHEETS_CLIENT_SECRET"]
+SHEETS_REFRESH_TOKEN = os.environ["SHEETS_REFRESH_TOKEN"]
+
+SHEET_ID = os.environ["SHEET_ID"]
 
 MCC_IDS = [
     "7141208780",
@@ -59,12 +66,12 @@ CHILDREN_QUERY = """
       AND customer_client.status = 'ENABLED'
 """
 
-def get_client(mcc_id):
+def get_ads_client(mcc_id):
     return GoogleAdsClient.load_from_dict({
         "developer_token":   DEVELOPER_TOKEN,
-        "client_id":         CLIENT_ID,
-        "client_secret":     CLIENT_SECRET,
-        "refresh_token":     REFRESH_TOKEN,
+        "client_id":         ADS_CLIENT_ID,
+        "client_secret":     ADS_CLIENT_SECRET,
+        "refresh_token":     ADS_REFRESH_TOKEN,
         "login_customer_id": mcc_id,
         "use_proto_plus":    True,
     })
@@ -77,7 +84,7 @@ def main():
     for mcc_id in MCC_IDS:
         print(f"\nMCC: {mcc_id}")
         try:
-            client  = get_client(mcc_id)
+            client  = get_ads_client(mcc_id)
             service = client.get_service("GoogleAdsService")
 
             children = []
@@ -122,9 +129,9 @@ def main():
                             "ROAS":          round(conv_value / cost, 2) if cost > 0 else 0
                         })
                         count += 1
-                    print(f"— {count} rows")
+                    print(f"- {count} rows")
                 except Exception as e:
-                    print(f"— SKIPPED: {e}")
+                    print(f"- SKIPPED: {e}")
 
         except Exception as e:
             print(f"  ERROR: {e}")
@@ -135,36 +142,42 @@ def main():
     print("Writing to Google Sheet...")
     creds = Credentials(
         token=None,
-        refresh_token=REFRESH_TOKEN,
+        refresh_token=SHEETS_REFRESH_TOKEN,
         token_uri="https://oauth2.googleapis.com/token",
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
+        client_id=SHEETS_CLIENT_ID,
+        client_secret=SHEETS_CLIENT_SECRET,
         scopes=[
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive"
         ]
     )
     creds.refresh(Request())
+    print("Sheets auth successful.")
 
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SHEET_ID)
+    print(f"Connected to: {sh.title}")
 
     try:
         ws = sh.worksheet("AdsData")
         ws.clear()
-    except:
+    except Exception:
         ws = sh.add_worksheet(title="AdsData", rows=200000, cols=20)
 
-    headers = list(df.columns)
-    data    = df.fillna("").values.tolist()
-    ws.update([headers])
-    for i in range(0, len(data), 5000):
-        ws.append_rows(data[i:i+5000], value_input_option="USER_ENTERED")
-        print(f"  Written rows {i+1} to {min(i+5000, len(data))}")
+    if len(df) > 0:
+        headers = list(df.columns)
+        data    = df.fillna("").values.tolist()
+        ws.update([headers])
+        for i in range(0, len(data), 5000):
+            ws.append_rows(data[i:i+5000], value_input_option="USER_ENTERED")
+            print(f"  Written rows {i+1} to {min(i+5000, len(data))}")
+        print(f"Total {len(df)} rows written.")
+    else:
+        print("No data to write.")
 
     try:
         log = sh.worksheet("RunLog")
-    except:
+    except Exception:
         log = sh.add_worksheet(title="RunLog", rows=1000, cols=6)
         log.append_row(["Timestamp", "Rows", "MCCs", "Accounts", "Status"])
 
@@ -173,9 +186,9 @@ def main():
         len(df),
         ", ".join(MCC_IDS),
         len(set(df["Account_ID"].tolist())) if len(df) > 0 else 0,
-        "Success"
+        "Success" if len(df) > 0 else "No data"
     ])
-    print("Done.")
+    print("RunLog updated. Done.")
 
 if __name__ == "__main__":
     main()
