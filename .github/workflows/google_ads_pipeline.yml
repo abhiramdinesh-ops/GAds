@@ -1,49 +1,29 @@
-name: Google Ads Pipeline
+name: Google Ads to Sheets
 
 on:
- # schedule:
-  #  - cron: '0 * * * *'
+  schedule:
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 jobs:
-  run-pipeline:
+  run:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Write token.json
-        run: echo '${{ secrets.TOKEN_JSON }}' > token.json
-
-      - name: Run pipeline
+      - name: Run script
         env:
-          CLIENT_ID: ${{ secrets.CLIENT_ID }}
-          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          CLIENT_ID:       ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET:   ${{ secrets.CLIENT_SECRET }}
+          REFRESH_TOKEN:   ${{ secrets.REFRESH_TOKEN }}
           DEVELOPER_TOKEN: ${{ secrets.DEVELOPER_TOKEN }}
-          REDSHIFT_HOST: ${{ secrets.REDSHIFT_HOST }}
-          REDSHIFT_DB: ${{ secrets.REDSHIFT_DB }}
-          REDSHIFT_USER: ${{ secrets.REDSHIFT_USER }}
-          REDSHIFT_PASS: ${{ secrets.REDSHIFT_PASS }}
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-        run: python main.py
-
-      - name: Notify on failure
-        if: failure()
-        run: echo "Pipeline failed at $(date)"
+          SHEET_ID:        ${{ secrets.SHEET_ID }}
+        run: python ads_to_sheets.py
