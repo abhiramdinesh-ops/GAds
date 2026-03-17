@@ -13,14 +13,11 @@ logging.getLogger("cmdstanpy").setLevel(logging.ERROR)
 # =========================================
 # CREDENTIALS
 # =========================================
+ADS_CLIENT_ID        = os.environ["ADS_CLIENT_ID"]
+ADS_CLIENT_SECRET    = os.environ["ADS_CLIENT_SECRET"]
+ADS_REFRESH_TOKEN    = os.environ["ADS_REFRESH_TOKEN"]
+DEVELOPER_TOKEN      = os.environ["DEVELOPER_TOKEN"]
 
-# Google Ads credentials
-ADS_CLIENT_ID       = os.environ["ADS_CLIENT_ID"]
-ADS_CLIENT_SECRET   = os.environ["ADS_CLIENT_SECRET"]
-ADS_REFRESH_TOKEN   = os.environ["ADS_REFRESH_TOKEN"]
-DEVELOPER_TOKEN     = os.environ["DEVELOPER_TOKEN"]
-
-# Google Sheets credentials
 SHEETS_CLIENT_ID     = os.environ["SHEETS_CLIENT_ID"]
 SHEETS_CLIENT_SECRET = os.environ["SHEETS_CLIENT_SECRET"]
 SHEETS_REFRESH_TOKEN = os.environ["SHEETS_REFRESH_TOKEN"]
@@ -168,11 +165,11 @@ def run_prophet_forecast(df):
         print("No data for forecasting.")
         return pd.DataFrame()
 
-    # Prepare data — aggregate to campaign + date level
+    # Aggregate to campaign + date level
     df_agg = df.copy()
-    df_agg["data_date"] = pd.to_datetime(df_agg["Date"])
-    df_agg["cost"]        = df_agg["Cost"]
-    df_agg["conversions"] = df_agg["Conversions"]
+    df_agg["data_date"]     = pd.to_datetime(df_agg["Date"])
+    df_agg["cost"]          = df_agg["Cost"]
+    df_agg["conversions"]   = df_agg["Conversions"]
     df_agg["campaign_name"] = df_agg["Campaign_Name"]
 
     df_agg = df_agg.groupby(["data_date", "campaign_name"]).agg(
@@ -192,7 +189,7 @@ def run_prophet_forecast(df):
     # Raw for KPIs (includes zero conversion days)
     df_raw = df_agg.copy()
 
-    # Filter for Prophet training (conversions > 0)
+    # Filter for Prophet training
     df_filtered = df_agg[df_agg["conversions"] > 0].copy()
     df_filtered["cpl"] = df_filtered["cost"] / df_filtered["conversions"]
 
@@ -298,17 +295,17 @@ def run_prophet_forecast(df):
             forecast_direction = None
 
         kpis = {
-            "last7_cpl":          last7_cpl,
-            "prev7_cpl":          prev7_cpl,
-            "last7_cost":         last7_cost,
-            "last7_conv":         int(last7_conv),
-            "trend":              trend,
-            "current_pct":        round(current_pct, 2) if current_pct else None,
-            "forecast_avg_cpl":   forecast_avg_cpl,
-            "fcast_pct":          round(fcast_pct, 2) if fcast_pct else None,
-            "forecast_direction": forecast_direction,
-            "mape":               round(mape, 2) if not np.isnan(mape) else None,
-            "reliability":        reliability,
+            "Last7_CPL":          last7_cpl,
+            "Prev7_CPL":          prev7_cpl,
+            "Last7_Cost":         round(last7_cost, 2),
+            "Last7_Conversions":  int(last7_conv),
+            "Trend":              trend,
+            "Current_Pct":        round(current_pct, 2) if current_pct else None,
+            "Forecast_Avg_CPL":   round(forecast_avg_cpl, 4),
+            "Forecast_Pct":       round(fcast_pct, 2) if fcast_pct else None,
+            "Forecast_Direction": forecast_direction,
+            "MAPE":               round(mape, 2) if not np.isnan(mape) else None,
+            "Reliability":        reliability,
         }
 
         return forecast_future, kpis
@@ -316,7 +313,7 @@ def run_prophet_forecast(df):
     # =========================================
     # RUN PER CAMPAIGN
     # =========================================
-    results = []
+    results   = []
     campaigns = df_filtered["campaign_name"].unique()
 
     for campaign in campaigns:
@@ -335,21 +332,23 @@ def run_prophet_forecast(df):
 
         for _, row in forecast_future.iterrows():
             results.append({
-                "data_date":          str(row["ds"].date()),
-                "campaign_name":      campaign,
-                "actual_cpl":         None,
-                "forecast_cpl":       round(row["yhat"], 4),
-                "lower_ci":           round(row["yhat_lower"], 4),
-                "upper_ci":           round(row["yhat_upper"], 4),
-                "last7_cpl":          kpis["last7_cpl"],
-                "prev7_cpl":          kpis["prev7_cpl"],
-                "trend":              kpis["trend"],
-                "current_pct":        kpis["current_pct"],
-                "forecast_avg_cpl":   kpis["forecast_avg_cpl"],
-                "fcast_pct":          kpis["fcast_pct"],
-                "forecast_direction": kpis["forecast_direction"],
-                "mape":               kpis["mape"],
-                "reliability":        kpis["reliability"],
+                "Date":               str(row["ds"].date()),
+                "Account":            campaign,
+                "Actual_CPL":         None,
+                "Forecast_CPL":       round(row["yhat"], 4),
+                "Lower_CI":           round(row["yhat_lower"], 4),
+                "Upper_CI":           round(row["yhat_upper"], 4),
+                "Last7_CPL":          kpis["Last7_CPL"],
+                "Prev7_CPL":          kpis["Prev7_CPL"],
+                "Last7_Cost":         kpis["Last7_Cost"],
+                "Last7_Conversions":  kpis["Last7_Conversions"],
+                "Trend":              kpis["Trend"],
+                "Current_Pct":        kpis["Current_Pct"],
+                "Forecast_Avg_CPL":   kpis["Forecast_Avg_CPL"],
+                "Forecast_Pct":       kpis["Forecast_Pct"],
+                "Forecast_Direction": kpis["Forecast_Direction"],
+                "MAPE":               kpis["MAPE"],
+                "Reliability":        kpis["Reliability"],
             })
 
     # =========================================
@@ -365,25 +364,27 @@ def run_prophet_forecast(df):
         forecast_future, kpis = run_prophet(portfolio_daily, portfolio_daily_raw)
         for _, row in forecast_future.iterrows():
             results.append({
-                "data_date":          str(row["ds"].date()),
-                "campaign_name":      "All Campaigns Combined",
-                "actual_cpl":         None,
-                "forecast_cpl":       round(row["yhat"], 4),
-                "lower_ci":           round(row["yhat_lower"], 4),
-                "upper_ci":           round(row["yhat_upper"], 4),
-                "last7_cpl":          kpis["last7_cpl"],
-                "prev7_cpl":          kpis["prev7_cpl"],
-                "trend":              kpis["trend"],
-                "current_pct":        kpis["current_pct"],
-                "forecast_avg_cpl":   kpis["forecast_avg_cpl"],
-                "fcast_pct":          kpis["fcast_pct"],
-                "forecast_direction": kpis["forecast_direction"],
-                "mape":               kpis["mape"],
-                "reliability":        kpis["reliability"],
+                "Date":               str(row["ds"].date()),
+                "Account":            "All Campaigns Combined",
+                "Actual_CPL":         None,
+                "Forecast_CPL":       round(row["yhat"], 4),
+                "Lower_CI":           round(row["yhat_lower"], 4),
+                "Upper_CI":           round(row["yhat_upper"], 4),
+                "Last7_CPL":          kpis["Last7_CPL"],
+                "Prev7_CPL":          kpis["Prev7_CPL"],
+                "Last7_Cost":         kpis["Last7_Cost"],
+                "Last7_Conversions":  kpis["Last7_Conversions"],
+                "Trend":              kpis["Trend"],
+                "Current_Pct":        kpis["Current_Pct"],
+                "Forecast_Avg_CPL":   kpis["Forecast_Avg_CPL"],
+                "Forecast_Pct":       kpis["Forecast_Pct"],
+                "Forecast_Direction": kpis["Forecast_Direction"],
+                "MAPE":               kpis["MAPE"],
+                "Reliability":        kpis["Reliability"],
             })
-        print(f"  Portfolio forecast CPL: ${kpis['forecast_avg_cpl']:.2f}")
-        print(f"  Portfolio last 7 CPL:   ${kpis['last7_cpl']:.2f}")
-        print(f"  Portfolio trend:        {kpis['trend']}")
+        print(f"  Portfolio forecast CPL: ${kpis['Forecast_Avg_CPL']:.2f}")
+        print(f"  Portfolio last 7 CPL:   ${kpis['Last7_CPL']:.2f}")
+        print(f"  Portfolio trend:        {kpis['Trend']}")
     except Exception as e:
         print(f"  Portfolio forecast error: {e}")
 
@@ -391,32 +392,47 @@ def run_prophet_forecast(df):
     # HISTORICAL ACTUALS — per campaign
     # =========================================
     actual_table = df_filtered[["data_date", "campaign_name", "cpl"]].copy()
-    actual_table = actual_table.rename(columns={"cpl": "actual_cpl"})
-    actual_table["data_date"] = actual_table["data_date"].astype(str)
-    for col in ["forecast_cpl", "lower_ci", "upper_ci", "last7_cpl", "prev7_cpl",
-                "trend", "current_pct", "forecast_avg_cpl", "fcast_pct",
-                "forecast_direction", "mape", "reliability"]:
+    actual_table = actual_table.rename(columns={
+        "data_date":     "Date",
+        "campaign_name": "Account",
+        "cpl":           "Actual_CPL"
+    })
+    actual_table["Date"] = actual_table["Date"].astype(str)
+    for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
+                "Last7_Cost", "Last7_Conversions", "Trend", "Current_Pct",
+                "Forecast_Avg_CPL", "Forecast_Pct", "Forecast_Direction",
+                "MAPE", "Reliability"]:
         actual_table[col] = None
 
     # =========================================
     # HISTORICAL ACTUALS — all combined
     # =========================================
     portfolio_hist = portfolio_daily.copy()
-    portfolio_hist["campaign_name"] = "All Campaigns Combined"
-    portfolio_hist["actual_cpl"]    = portfolio_hist["cost"] / portfolio_hist["conversions"]
-    portfolio_hist["data_date"]     = portfolio_hist["data_date"].astype(str)
-    for col in ["forecast_cpl", "lower_ci", "upper_ci", "last7_cpl", "prev7_cpl",
-                "trend", "current_pct", "forecast_avg_cpl", "fcast_pct",
-                "forecast_direction", "mape", "reliability"]:
+    portfolio_hist["Account"]    = "All Campaigns Combined"
+    portfolio_hist["Actual_CPL"] = portfolio_hist["cost"] / portfolio_hist["conversions"]
+    portfolio_hist["Date"]       = portfolio_hist["data_date"].astype(str)
+    for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
+                "Last7_Cost", "Last7_Conversions", "Trend", "Current_Pct",
+                "Forecast_Avg_CPL", "Forecast_Pct", "Forecast_Direction",
+                "MAPE", "Reliability"]:
         portfolio_hist[col] = None
-    portfolio_hist = portfolio_hist.drop(columns=["cost", "conversions"])
+    portfolio_hist = portfolio_hist.drop(columns=["cost", "conversions", "data_date"])
 
     # =========================================
-    # COMBINE ALL
+    # COMBINE + FINAL COLUMN ORDER
     # =========================================
     forecast_df = pd.DataFrame(results)
     final_table = pd.concat([actual_table, portfolio_hist, forecast_df], ignore_index=True)
-    final_table = final_table.sort_values(["campaign_name", "data_date"]).reset_index(drop=True)
+    final_table = final_table.sort_values(["Account", "Date"]).reset_index(drop=True)
+
+    # Enforce exact column order matching Power BI schema
+    col_order = [
+        "Date", "Account", "Actual_CPL", "Forecast_CPL", "Lower_CI", "Upper_CI",
+        "Last7_CPL", "Prev7_CPL", "Last7_Cost", "Last7_Conversions",
+        "Trend", "Current_Pct", "Forecast_Avg_CPL", "Forecast_Pct",
+        "Forecast_Direction", "MAPE", "Reliability"
+    ]
+    final_table = final_table[col_order]
     final_table = final_table.fillna("")
 
     print(f"\nForecast table rows: {len(final_table)}")
@@ -440,7 +456,7 @@ def get_sheets_client():
     creds.refresh(Request())
     return gspread.authorize(creds)
 
-def write_to_sheet(gc, sh, tab_name, df):
+def write_to_sheet(sh, tab_name, df):
     try:
         ws = sh.worksheet(tab_name)
         ws.clear()
@@ -471,18 +487,16 @@ def main():
     print("\nRunning Prophet forecast...")
     forecast_df = run_prophet_forecast(ads_df)
 
-    # Step 3: Write both to Google Sheets
+    # Step 3: Write to Google Sheets
     print("\nConnecting to Google Sheets...")
     gc = get_sheets_client()
     sh = gc.open_by_key(SHEET_ID)
     print(f"Connected to: {sh.title}")
 
-    # Write AdsData tab (unchanged)
-    write_to_sheet(gc, sh, "AdsData", ads_df)
+    write_to_sheet(sh, "AdsData", ads_df)
 
-    # Write Forecast tab (new)
     if not forecast_df.empty:
-        write_to_sheet(gc, sh, "Forecast", forecast_df)
+        write_to_sheet(sh, "Forecast", forecast_df)
 
     # RunLog
     try:
