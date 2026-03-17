@@ -172,13 +172,13 @@ def run_prophet_forecast(df):
     df_agg["account_name"] = df_agg["Account_Name"]
     df_agg["campaign_id"]  = df_agg["Campaign_ID"]
 
-    # Account-level aggregation — Prophet runs per account
+    # Account-level aggregation for Prophet
     acct_agg = df_agg.groupby(["data_date", "account_name"]).agg(
         cost=("cost", "sum"),
         conversions=("conversions", "sum")
     ).reset_index()
 
-    # Campaign-level aggregation — for Actual_CPL output rows
+    # Campaign-level aggregation for output rows
     camp_agg = df_agg.groupby(["data_date", "account_name", "campaign_id"]).agg(
         cost=("cost", "sum"),
         conversions=("conversions", "sum")
@@ -195,16 +195,15 @@ def run_prophet_forecast(df):
     acct_agg = acct_agg[acct_agg["data_date"] >= cutoff]
     camp_agg = camp_agg[camp_agg["data_date"] >= cutoff]
 
-    # Raw for KPIs (includes zero-conversion days)
+    # Raw for KPIs
     df_raw = acct_agg.copy()
 
-    # Filtered for Prophet training (conversions > 0 at account level)
+    # Filtered for Prophet (account level, conversions > 0)
     df_filtered        = acct_agg[acct_agg["conversions"] > 0].copy()
     df_filtered["cpl"] = df_filtered["cost"] / df_filtered["conversions"]
 
-    # Campaign filtered for Actual_CPL rows (conversions > 0 at campaign level)
-    camp_filtered        = camp_agg[camp_agg["conversions"] > 0].copy()
-    camp_filtered["Actual_CPL"] = camp_filtered["cost"] / camp_filtered["conversions"]
+    # Campaign filtered for historical output (conversions > 0)
+    camp_filtered = camp_agg[camp_agg["conversions"] > 0].copy()
 
     print(f"\nReference date: {reference_date.date()}")
     print(f"After cleaning: {df_filtered.shape}")
@@ -322,9 +321,6 @@ def run_prophet_forecast(df):
 
     # =========================================
     # RUN PER ACCOUNT
-    # Forecast rows are expanded per campaign
-    # so each campaign under the account gets
-    # its own forecast row per date
     # =========================================
     results  = []
     accounts = df_filtered["account_name"].unique()
@@ -347,13 +343,15 @@ def run_prophet_forecast(df):
         # Get unique campaigns for this account
         camp_ids = df_agg[df_agg["account_name"] == account]["campaign_id"].unique().tolist()
 
-        # Expand: one forecast row per campaign per date
+        # One forecast row per campaign per date
         for _, row in forecast_future.iterrows():
             for cid in camp_ids:
                 results.append({
                     "Date":               str(row["ds"].date()),
                     "Account":            account,
                     "Campaign_ID":        cid,
+                    "Cost":               None,
+                    "Conversions":        None,
                     "Actual_CPL":         None,
                     "Forecast_CPL":       round(row["yhat"], 4),
                     "Lower_CI":           round(row["yhat_lower"], 4),
@@ -387,6 +385,8 @@ def run_prophet_forecast(df):
                 "Date":               str(row["ds"].date()),
                 "Account":            "All Accounts Combined",
                 "Campaign_ID":        "ALL",
+                "Cost":               None,
+                "Conversions":        None,
                 "Actual_CPL":         None,
                 "Forecast_CPL":       round(row["yhat"], 4),
                 "Lower_CI":           round(row["yhat_lower"], 4),
@@ -411,15 +411,18 @@ def run_prophet_forecast(df):
 
     # =========================================
     # HISTORICAL ACTUALS — one row per campaign
-    # per date, CPL = cost/conv at campaign level
+    # Includes Cost + Conversions so Power BI
+    # can calculate CPL = SUM(Cost)/SUM(Conv)
     # =========================================
     actual_table = camp_filtered.rename(columns={
         "data_date":    "Date",
         "account_name": "Account",
-        "campaign_id":  "Campaign_ID"
+        "campaign_id":  "Campaign_ID",
+        "cost":         "Cost",
+        "conversions":  "Conversions"
     }).copy()
-    actual_table["Date"] = actual_table["Date"].astype(str)
-    actual_table = actual_table.drop(columns=["cost", "conversions"])
+    actual_table["Date"]       = actual_table["Date"].astype(str)
+    actual_table["Actual_CPL"] = actual_table["Cost"] / actual_table["Conversions"]
 
     for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
                 "Last7_Cost", "Last7_Conversions", "Trend", "Current_Pct",
@@ -433,6 +436,8 @@ def run_prophet_forecast(df):
     portfolio_hist = portfolio_daily.copy()
     portfolio_hist["Account"]     = "All Accounts Combined"
     portfolio_hist["Campaign_ID"] = "ALL"
+    portfolio_hist["Cost"]        = portfolio_hist["cost"]
+    portfolio_hist["Conversions"] = portfolio_hist["conversions"]
     portfolio_hist["Actual_CPL"]  = portfolio_hist["cost"] / portfolio_hist["conversions"]
     portfolio_hist["Date"]        = portfolio_hist["data_date"].astype(str)
     for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
@@ -450,11 +455,12 @@ def run_prophet_forecast(df):
     final_table = final_table.sort_values(["Account", "Campaign_ID", "Date"]).reset_index(drop=True)
 
     col_order = [
-        "Date", "Account", "Campaign_ID", "Actual_CPL", "Forecast_CPL",
-        "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
-        "Last7_Cost", "Last7_Conversions", "Trend", "Current_Pct",
-        "Forecast_Avg_CPL", "Forecast_Pct", "Forecast_Direction",
-        "MAPE", "Reliability"
+        "Date", "Account", "Campaign_ID",
+        "Cost", "Conversions", "Actual_CPL",
+        "Forecast_CPL", "Lower_CI", "Upper_CI",
+        "Last7_CPL", "Prev7_CPL", "Last7_Cost", "Last7_Conversions",
+        "Trend", "Current_Pct", "Forecast_Avg_CPL", "Forecast_Pct",
+        "Forecast_Direction", "MAPE", "Reliability"
     ]
     final_table = final_table[col_order]
     final_table = final_table.fillna("")
