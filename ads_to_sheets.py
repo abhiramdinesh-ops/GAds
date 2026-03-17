@@ -152,7 +152,7 @@ def pull_ads_data():
     return df
 
 # =========================================
-# PROPHET FORECASTING
+# PROPHET FORECASTING — per campaign
 # =========================================
 def run_prophet_forecast(df):
     try:
@@ -165,14 +165,18 @@ def run_prophet_forecast(df):
         print("No data for forecasting.")
         return pd.DataFrame()
 
-    # Aggregate to ACCOUNT + date level (not campaign level)
+    # Aggregate to campaign + date level
     df_agg = df.copy()
-    df_agg["data_date"]    = pd.to_datetime(df_agg["Date"])
-    df_agg["cost"]         = df_agg["Cost"]
-    df_agg["conversions"]  = df_agg["Conversions"]
-    df_agg["account_name"] = df_agg["Account_Name"]  # <-- use Account_Name
+    df_agg["data_date"]     = pd.to_datetime(df_agg["Date"])
+    df_agg["cost"]          = df_agg["Cost"]
+    df_agg["conversions"]   = df_agg["Conversions"]
+    df_agg["campaign_id"]   = df_agg["Campaign_ID"]
+    df_agg["campaign_name"] = df_agg["Campaign_Name"]
+    df_agg["account_name"]  = df_agg["Account_Name"]
 
-    df_agg = df_agg.groupby(["data_date", "account_name"]).agg(
+    df_agg = df_agg.groupby(
+        ["data_date", "campaign_id", "campaign_name", "account_name"]
+    ).agg(
         cost=("cost", "sum"),
         conversions=("conversions", "sum")
     ).reset_index()
@@ -186,7 +190,7 @@ def run_prophet_forecast(df):
     cutoff = reference_date - pd.Timedelta(days=59)
     df_agg = df_agg[df_agg["data_date"] >= cutoff]
 
-    # Raw for KPIs
+    # Raw for KPIs (includes zero conversion days)
     df_raw = df_agg.copy()
 
     # Filter for Prophet training
@@ -311,21 +315,26 @@ def run_prophet_forecast(df):
         return forecast_future, kpis
 
     # =========================================
-    # RUN PER ACCOUNT
+    # RUN PER CAMPAIGN
     # =========================================
-    results  = []
-    accounts = df_filtered["account_name"].unique()
+    results   = []
+    campaigns = df_filtered[["campaign_id", "campaign_name", "account_name"]].drop_duplicates()
 
-    for account in accounts:
-        account_df     = df_filtered[df_filtered["account_name"] == account].copy()
-        account_kpi_df = df_raw[df_raw["account_name"] == account].copy()
-        if len(account_df) < 14:
-            print(f"Skipping {account} - not enough data ({len(account_df)} days)")
+    for _, camp_row in campaigns.iterrows():
+        cid   = camp_row["campaign_id"]
+        cname = camp_row["campaign_name"]
+        aname = camp_row["account_name"]
+
+        camp_df     = df_filtered[df_filtered["campaign_id"] == cid].copy()
+        camp_kpi_df = df_raw[df_raw["campaign_id"] == cid].copy()
+
+        if len(camp_df) < 14:
+            print(f"Skipping {cname} - not enough data ({len(camp_df)} days)")
             continue
 
-        print(f"Forecasting: {account}")
+        print(f"Forecasting: {cname} ({cid})")
         try:
-            forecast_future, kpis = run_prophet(account_df, account_kpi_df)
+            forecast_future, kpis = run_prophet(camp_df, camp_kpi_df)
         except Exception as e:
             print(f"  Error: {e}")
             continue
@@ -333,7 +342,8 @@ def run_prophet_forecast(df):
         for _, row in forecast_future.iterrows():
             results.append({
                 "Date":               str(row["ds"].date()),
-                "Account":            account,
+                "Account":            aname,
+                "Campaign_ID":        cid,
                 "Actual_CPL":         None,
                 "Forecast_CPL":       round(row["yhat"], 4),
                 "Lower_CI":           round(row["yhat_lower"], 4),
@@ -352,9 +362,9 @@ def run_prophet_forecast(df):
             })
 
     # =========================================
-    # RUN ALL ACCOUNTS COMBINED
+    # RUN ALL CAMPAIGNS COMBINED
     # =========================================
-    print("Forecasting: All Accounts Combined")
+    print("Forecasting: All Campaigns Combined")
     portfolio_daily     = df_filtered.groupby("data_date").agg(
         cost=("cost", "sum"), conversions=("conversions", "sum")).reset_index()
     portfolio_daily_raw = df_raw.groupby("data_date").agg(
@@ -366,6 +376,7 @@ def run_prophet_forecast(df):
             results.append({
                 "Date":               str(row["ds"].date()),
                 "Account":            "All Accounts Combined",
+                "Campaign_ID":        "ALL",
                 "Actual_CPL":         None,
                 "Forecast_CPL":       round(row["yhat"], 4),
                 "Lower_CI":           round(row["yhat_lower"], 4),
@@ -389,12 +400,13 @@ def run_prophet_forecast(df):
         print(f"  Combined forecast error: {e}")
 
     # =========================================
-    # HISTORICAL ACTUALS — per account
+    # HISTORICAL ACTUALS — per campaign
     # =========================================
-    actual_table = df_filtered[["data_date", "account_name", "cpl"]].copy()
+    actual_table = df_filtered[["data_date", "account_name", "campaign_id", "cpl"]].copy()
     actual_table = actual_table.rename(columns={
         "data_date":    "Date",
         "account_name": "Account",
+        "campaign_id":  "Campaign_ID",
         "cpl":          "Actual_CPL"
     })
     actual_table["Date"] = actual_table["Date"].astype(str)
@@ -409,6 +421,7 @@ def run_prophet_forecast(df):
     # =========================================
     portfolio_hist = portfolio_daily.copy()
     portfolio_hist["Account"]    = "All Accounts Combined"
+    portfolio_hist["Campaign_ID"] = "ALL"
     portfolio_hist["Actual_CPL"] = portfolio_hist["cost"] / portfolio_hist["conversions"]
     portfolio_hist["Date"]       = portfolio_hist["data_date"].astype(str)
     for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
@@ -423,13 +436,14 @@ def run_prophet_forecast(df):
     # =========================================
     forecast_df = pd.DataFrame(results)
     final_table = pd.concat([actual_table, portfolio_hist, forecast_df], ignore_index=True)
-    final_table = final_table.sort_values(["Account", "Date"]).reset_index(drop=True)
+    final_table = final_table.sort_values(["Account", "Campaign_ID", "Date"]).reset_index(drop=True)
 
     col_order = [
-        "Date", "Account", "Actual_CPL", "Forecast_CPL", "Lower_CI", "Upper_CI",
-        "Last7_CPL", "Prev7_CPL", "Last7_Cost", "Last7_Conversions",
-        "Trend", "Current_Pct", "Forecast_Avg_CPL", "Forecast_Pct",
-        "Forecast_Direction", "MAPE", "Reliability"
+        "Date", "Account", "Campaign_ID", "Actual_CPL", "Forecast_CPL",
+        "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
+        "Last7_Cost", "Last7_Conversions", "Trend", "Current_Pct",
+        "Forecast_Avg_CPL", "Forecast_Pct", "Forecast_Direction",
+        "MAPE", "Reliability"
     ]
     final_table = final_table[col_order]
     final_table = final_table.fillna("")
