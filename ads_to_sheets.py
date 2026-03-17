@@ -165,12 +165,7 @@ def run_prophet_forecast(df):
         print("No data for forecasting.")
         return pd.DataFrame()
 
-    # =========================================
-    # Step 1: Aggregate from AdsData to
-    # campaign + date level (sum cost & conv)
-    # CPL is NEVER pre-calculated here —
-    # always derived as cost/conv after agg
-    # =========================================
+    # Aggregate to campaign + date level
     df_agg = df.copy()
     df_agg["data_date"]     = pd.to_datetime(df_agg["Date"])
     df_agg["cost"]          = df_agg["Cost"]
@@ -187,23 +182,28 @@ def run_prophet_forecast(df):
     ).reset_index()
 
     # Exclude today (partial data)
-    today          = pd.Timestamp.now().normalize()
-    df_agg         = df_agg[df_agg["data_date"] < today]
-    reference_date = df_agg["data_date"].max()
+    today  = pd.Timestamp.now().normalize()
+    df_agg = df_agg[df_agg["data_date"] < today]
 
-    # Keep last 60 days
+    # Exclude last 2 days — Google Ads has ~48hr conversion attribution delay
+    # These days have incomplete conversions causing CPL to be artificially high
+    reference_date = df_agg["data_date"].max() - pd.Timedelta(days=2)
+    df_agg         = df_agg[df_agg["data_date"] <= reference_date]
+
+    print(f"\nReference date (after 2-day delay trim): {reference_date.date()}")
+
+    # Keep last 60 days from reference date
     cutoff = reference_date - pd.Timedelta(days=59)
     df_agg = df_agg[df_agg["data_date"] >= cutoff]
 
     # df_raw keeps ALL rows including zero-conversion days (for KPI calc)
     df_raw = df_agg.copy()
 
-    # df_filtered = only rows with conversions > 0 (for Prophet training)
+    # df_filtered only rows with conversions > 0 (for Prophet training)
     # CPL calculated AFTER aggregation as cost/conversions
     df_filtered = df_agg[df_agg["conversions"] > 0].copy()
     df_filtered["cpl"] = df_filtered["cost"] / df_filtered["conversions"]
 
-    print(f"\nReference date: {reference_date.date()}")
     print(f"After cleaning: {df_filtered.shape}")
 
     # Date windows
@@ -214,7 +214,6 @@ def run_prophet_forecast(df):
 
     def run_prophet(daily_df, kpi_df):
         daily_df = daily_df.sort_values("data_date").copy()
-        # CPL derived from aggregated cost/conversions — not pre-calc
         daily_df["cpl"] = daily_df["cost"] / daily_df["conversions"]
 
         # IQR capping
@@ -265,7 +264,7 @@ def run_prophet_forecast(df):
         elif mape < 35:       reliability = "Medium"
         else:                 reliability = "Low"
 
-        # KPIs — always from raw (includes zero-conv days)
+        # KPIs always from raw (includes zero-conv days)
         kpi_df     = kpi_df.sort_values("data_date").copy()
         last7      = kpi_df[kpi_df["data_date"] >= last7_start]
         prev7      = kpi_df[
@@ -278,7 +277,7 @@ def run_prophet_forecast(df):
         prev7_cost = prev7["cost"].sum()
         prev7_conv = prev7["conversions"].sum()
 
-        # CPL = total cost / total conversions (never average of daily CPLs)
+        # CPL = total cost / total conversions
         last7_cpl = last7_cost / last7_conv if last7_conv > 0 else None
         prev7_cpl = prev7_cost / prev7_conv if prev7_conv > 0 else None
 
@@ -411,8 +410,7 @@ def run_prophet_forecast(df):
 
     # =========================================
     # HISTORICAL ACTUALS — per campaign
-    # Recalculate CPL from aggregated
-    # cost/conversions — never use pre-calc cpl
+    # CPL = sum(cost) / sum(conv) after groupby
     # =========================================
     actual_table = df_filtered.groupby(
         ["data_date", "campaign_id", "account_name"]
@@ -421,7 +419,6 @@ def run_prophet_forecast(df):
         conversions=("conversions", "sum")
     ).reset_index()
 
-    # CPL = total cost / total conversions per campaign per day
     actual_table["Actual_CPL"] = actual_table["cost"] / actual_table["conversions"]
     actual_table = actual_table.rename(columns={
         "data_date":    "Date",
@@ -443,7 +440,6 @@ def run_prophet_forecast(df):
     portfolio_hist = portfolio_daily.copy()
     portfolio_hist["Account"]     = "All Accounts Combined"
     portfolio_hist["Campaign_ID"] = "ALL"
-    # CPL = total cost / total conversions
     portfolio_hist["Actual_CPL"]  = portfolio_hist["cost"] / portfolio_hist["conversions"]
     portfolio_hist["Date"]        = portfolio_hist["data_date"].astype(str)
     for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
