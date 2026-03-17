@@ -132,7 +132,6 @@ def main():
     df = pd.DataFrame(all_rows)
     print(f"\nTotal rows: {len(df)}")
 
-    # Write to Google Sheet
     print("Writing to Google Sheet...")
     creds = Credentials(
         token=None,
@@ -180,11 +179,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
-
-**`requirements.txt`**
-```
-google-ads
-gspread
-google-auth
-pandas
