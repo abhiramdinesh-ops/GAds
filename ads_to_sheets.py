@@ -165,14 +165,14 @@ def run_prophet_forecast(df):
         print("No data for forecasting.")
         return pd.DataFrame()
 
-    # Aggregate to campaign + date level
+    # Aggregate to ACCOUNT + date level (not campaign level)
     df_agg = df.copy()
-    df_agg["data_date"]     = pd.to_datetime(df_agg["Date"])
-    df_agg["cost"]          = df_agg["Cost"]
-    df_agg["conversions"]   = df_agg["Conversions"]
-    df_agg["campaign_name"] = df_agg["Campaign_Name"]
+    df_agg["data_date"]    = pd.to_datetime(df_agg["Date"])
+    df_agg["cost"]         = df_agg["Cost"]
+    df_agg["conversions"]  = df_agg["Conversions"]
+    df_agg["account_name"] = df_agg["Account_Name"]  # <-- use Account_Name
 
-    df_agg = df_agg.groupby(["data_date", "campaign_name"]).agg(
+    df_agg = df_agg.groupby(["data_date", "account_name"]).agg(
         cost=("cost", "sum"),
         conversions=("conversions", "sum")
     ).reset_index()
@@ -186,7 +186,7 @@ def run_prophet_forecast(df):
     cutoff = reference_date - pd.Timedelta(days=59)
     df_agg = df_agg[df_agg["data_date"] >= cutoff]
 
-    # Raw for KPIs (includes zero conversion days)
+    # Raw for KPIs
     df_raw = df_agg.copy()
 
     # Filter for Prophet training
@@ -295,8 +295,8 @@ def run_prophet_forecast(df):
             forecast_direction = None
 
         kpis = {
-            "Last7_CPL":          last7_cpl,
-            "Prev7_CPL":          prev7_cpl,
+            "Last7_CPL":          round(last7_cpl, 4) if last7_cpl else None,
+            "Prev7_CPL":          round(prev7_cpl, 4) if prev7_cpl else None,
             "Last7_Cost":         round(last7_cost, 2),
             "Last7_Conversions":  int(last7_conv),
             "Trend":              trend,
@@ -311,21 +311,21 @@ def run_prophet_forecast(df):
         return forecast_future, kpis
 
     # =========================================
-    # RUN PER CAMPAIGN
+    # RUN PER ACCOUNT
     # =========================================
-    results   = []
-    campaigns = df_filtered["campaign_name"].unique()
+    results  = []
+    accounts = df_filtered["account_name"].unique()
 
-    for campaign in campaigns:
-        campaign_df     = df_filtered[df_filtered["campaign_name"] == campaign].copy()
-        campaign_kpi_df = df_raw[df_raw["campaign_name"] == campaign].copy()
-        if len(campaign_df) < 14:
-            print(f"Skipping {campaign} - not enough data ({len(campaign_df)} days)")
+    for account in accounts:
+        account_df     = df_filtered[df_filtered["account_name"] == account].copy()
+        account_kpi_df = df_raw[df_raw["account_name"] == account].copy()
+        if len(account_df) < 14:
+            print(f"Skipping {account} - not enough data ({len(account_df)} days)")
             continue
 
-        print(f"Forecasting: {campaign}")
+        print(f"Forecasting: {account}")
         try:
-            forecast_future, kpis = run_prophet(campaign_df, campaign_kpi_df)
+            forecast_future, kpis = run_prophet(account_df, account_kpi_df)
         except Exception as e:
             print(f"  Error: {e}")
             continue
@@ -333,7 +333,7 @@ def run_prophet_forecast(df):
         for _, row in forecast_future.iterrows():
             results.append({
                 "Date":               str(row["ds"].date()),
-                "Account":            campaign,
+                "Account":            account,
                 "Actual_CPL":         None,
                 "Forecast_CPL":       round(row["yhat"], 4),
                 "Lower_CI":           round(row["yhat_lower"], 4),
@@ -352,9 +352,9 @@ def run_prophet_forecast(df):
             })
 
     # =========================================
-    # RUN ALL CAMPAIGNS COMBINED
+    # RUN ALL ACCOUNTS COMBINED
     # =========================================
-    print("Forecasting: All Campaigns Combined")
+    print("Forecasting: All Accounts Combined")
     portfolio_daily     = df_filtered.groupby("data_date").agg(
         cost=("cost", "sum"), conversions=("conversions", "sum")).reset_index()
     portfolio_daily_raw = df_raw.groupby("data_date").agg(
@@ -365,7 +365,7 @@ def run_prophet_forecast(df):
         for _, row in forecast_future.iterrows():
             results.append({
                 "Date":               str(row["ds"].date()),
-                "Account":            "All Campaigns Combined",
+                "Account":            "All Accounts Combined",
                 "Actual_CPL":         None,
                 "Forecast_CPL":       round(row["yhat"], 4),
                 "Lower_CI":           round(row["yhat_lower"], 4),
@@ -382,20 +382,20 @@ def run_prophet_forecast(df):
                 "MAPE":               kpis["MAPE"],
                 "Reliability":        kpis["Reliability"],
             })
-        print(f"  Portfolio forecast CPL: ${kpis['Forecast_Avg_CPL']:.2f}")
-        print(f"  Portfolio last 7 CPL:   ${kpis['Last7_CPL']:.2f}")
-        print(f"  Portfolio trend:        {kpis['Trend']}")
+        print(f"  Combined forecast CPL: ${kpis['Forecast_Avg_CPL']:.2f}")
+        print(f"  Combined last 7 CPL:   ${kpis['Last7_CPL']:.2f}")
+        print(f"  Combined trend:        {kpis['Trend']}")
     except Exception as e:
-        print(f"  Portfolio forecast error: {e}")
+        print(f"  Combined forecast error: {e}")
 
     # =========================================
-    # HISTORICAL ACTUALS — per campaign
+    # HISTORICAL ACTUALS — per account
     # =========================================
-    actual_table = df_filtered[["data_date", "campaign_name", "cpl"]].copy()
+    actual_table = df_filtered[["data_date", "account_name", "cpl"]].copy()
     actual_table = actual_table.rename(columns={
-        "data_date":     "Date",
-        "campaign_name": "Account",
-        "cpl":           "Actual_CPL"
+        "data_date":    "Date",
+        "account_name": "Account",
+        "cpl":          "Actual_CPL"
     })
     actual_table["Date"] = actual_table["Date"].astype(str)
     for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
@@ -408,7 +408,7 @@ def run_prophet_forecast(df):
     # HISTORICAL ACTUALS — all combined
     # =========================================
     portfolio_hist = portfolio_daily.copy()
-    portfolio_hist["Account"]    = "All Campaigns Combined"
+    portfolio_hist["Account"]    = "All Accounts Combined"
     portfolio_hist["Actual_CPL"] = portfolio_hist["cost"] / portfolio_hist["conversions"]
     portfolio_hist["Date"]       = portfolio_hist["data_date"].astype(str)
     for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
@@ -425,7 +425,6 @@ def run_prophet_forecast(df):
     final_table = pd.concat([actual_table, portfolio_hist, forecast_df], ignore_index=True)
     final_table = final_table.sort_values(["Account", "Date"]).reset_index(drop=True)
 
-    # Enforce exact column order matching Power BI schema
     col_order = [
         "Date", "Account", "Actual_CPL", "Forecast_CPL", "Lower_CI", "Upper_CI",
         "Last7_CPL", "Prev7_CPL", "Last7_Cost", "Last7_Conversions",
