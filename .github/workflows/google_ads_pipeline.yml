@@ -21,9 +21,12 @@ jobs:
 
       - name: Run script
         env:
-          CLIENT_ID:       ${{ secrets.CLIENT_ID }}
-          CLIENT_SECRET:   ${{ secrets.CLIENT_SECRET }}
-          REFRESH_TOKEN:   ${{ secrets.REFRESH_TOKEN }}
-          DEVELOPER_TOKEN: ${{ secrets.DEVELOPER_TOKEN }}
-          SHEET_ID:        ${{ secrets.SHEET_ID }}
+          ADS_CLIENT_ID:       ${{ secrets.ADS_CLIENT_ID }}
+          ADS_CLIENT_SECRET:   ${{ secrets.ADS_CLIENT_SECRET }}
+          ADS_REFRESH_TOKEN:   ${{ secrets.ADS_REFRESH_TOKEN }}
+          DEVELOPER_TOKEN:     ${{ secrets.DEVELOPER_TOKEN }}
+          SHEETS_CLIENT_ID:    ${{ secrets.SHEETS_CLIENT_ID }}
+          SHEETS_CLIENT_SECRET: ${{ secrets.SHEETS_CLIENT_SECRET }}
+          SHEETS_REFRESH_TOKEN: ${{ secrets.SHEETS_REFRESH_TOKEN }}
+          SHEET_ID:            ${{ secrets.SHEET_ID }}
         run: python ads_to_sheets.py
