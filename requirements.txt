@@ -2,3 +2,5 @@ google-ads
 gspread
 google-auth
 pandas
+numpy
+prophet
