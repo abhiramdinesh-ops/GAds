@@ -165,45 +165,33 @@ def run_prophet_forecast(df):
         print("No data for forecasting.")
         return pd.DataFrame()
 
+    # Aggregate to ACCOUNT + date level (not campaign level)
     df_agg = df.copy()
     df_agg["data_date"]    = pd.to_datetime(df_agg["Date"])
     df_agg["cost"]         = df_agg["Cost"]
     df_agg["conversions"]  = df_agg["Conversions"]
-    df_agg["account_name"] = df_agg["Account_Name"]
-    df_agg["campaign_id"]  = df_agg["Campaign_ID"]
+    df_agg["account_name"] = df_agg["Account_Name"]  # <-- use Account_Name
 
-    # Account-level aggregation for Prophet
-    acct_agg = df_agg.groupby(["data_date", "account_name"]).agg(
+    df_agg = df_agg.groupby(["data_date", "account_name"]).agg(
         cost=("cost", "sum"),
         conversions=("conversions", "sum")
     ).reset_index()
 
-    # Campaign-level aggregation for output rows
-    camp_agg = df_agg.groupby(["data_date", "account_name", "campaign_id"]).agg(
-        cost=("cost", "sum"),
-        conversions=("conversions", "sum")
-    ).reset_index()
-
-    # Exclude today
+    # Exclude today (partial data)
     today          = pd.Timestamp.now().normalize()
-    acct_agg       = acct_agg[acct_agg["data_date"] < today]
-    camp_agg       = camp_agg[camp_agg["data_date"] < today]
-    reference_date = acct_agg["data_date"].max()
+    df_agg         = df_agg[df_agg["data_date"] < today]
+    reference_date = df_agg["data_date"].max()
 
-    # Last 60 days
-    cutoff   = reference_date - pd.Timedelta(days=59)
-    acct_agg = acct_agg[acct_agg["data_date"] >= cutoff]
-    camp_agg = camp_agg[camp_agg["data_date"] >= cutoff]
+    # Keep last 60 days
+    cutoff = reference_date - pd.Timedelta(days=59)
+    df_agg = df_agg[df_agg["data_date"] >= cutoff]
 
     # Raw for KPIs
-    df_raw = acct_agg.copy()
+    df_raw = df_agg.copy()
 
-    # Filtered for Prophet (account level, conversions > 0)
-    df_filtered        = acct_agg[acct_agg["conversions"] > 0].copy()
+    # Filter for Prophet training
+    df_filtered = df_agg[df_agg["conversions"] > 0].copy()
     df_filtered["cpl"] = df_filtered["cost"] / df_filtered["conversions"]
-
-    # Campaign filtered for historical output (conversions > 0)
-    camp_filtered = camp_agg[camp_agg["conversions"] > 0].copy()
 
     print(f"\nReference date: {reference_date.date()}")
     print(f"After cleaning: {df_filtered.shape}")
@@ -218,6 +206,7 @@ def run_prophet_forecast(df):
         daily_df = daily_df.sort_values("data_date").copy()
         daily_df["cpl"] = daily_df["cost"] / daily_df["conversions"]
 
+        # IQR capping
         Q1    = daily_df["cpl"].quantile(0.25)
         Q3    = daily_df["cpl"].quantile(0.75)
         IQR   = Q3 - Q1
@@ -245,6 +234,7 @@ def run_prophet_forecast(df):
         forecast["yhat_lower"] = np.exp(forecast["yhat_lower"])
         forecast["yhat_upper"] = np.exp(forecast["yhat_upper"])
 
+        # MAPE on last 7 days
         actual_window = daily_df[daily_df["data_date"] >= last7_start]
         forecast_hist = forecast[
             (forecast["ds"] >= last7_start) &
@@ -264,6 +254,7 @@ def run_prophet_forecast(df):
         elif mape < 35:       reliability = "Medium"
         else:                 reliability = "Low"
 
+        # KPIs from raw data
         kpi_df     = kpi_df.sort_values("data_date").copy()
         last7      = kpi_df[kpi_df["data_date"] >= last7_start]
         prev7      = kpi_df[
@@ -328,7 +319,6 @@ def run_prophet_forecast(df):
     for account in accounts:
         account_df     = df_filtered[df_filtered["account_name"] == account].copy()
         account_kpi_df = df_raw[df_raw["account_name"] == account].copy()
-
         if len(account_df) < 14:
             print(f"Skipping {account} - not enough data ({len(account_df)} days)")
             continue
@@ -340,34 +330,26 @@ def run_prophet_forecast(df):
             print(f"  Error: {e}")
             continue
 
-        # Get unique campaigns for this account
-        camp_ids = df_agg[df_agg["account_name"] == account]["campaign_id"].unique().tolist()
-
-        # One forecast row per campaign per date
         for _, row in forecast_future.iterrows():
-            for cid in camp_ids:
-                results.append({
-                    "Date":               str(row["ds"].date()),
-                    "Account":            account,
-                    "Campaign_ID":        cid,
-                    "Cost":               None,
-                    "Conversions":        None,
-                    "Actual_CPL":         None,
-                    "Forecast_CPL":       round(row["yhat"], 4),
-                    "Lower_CI":           round(row["yhat_lower"], 4),
-                    "Upper_CI":           round(row["yhat_upper"], 4),
-                    "Last7_CPL":          kpis["Last7_CPL"],
-                    "Prev7_CPL":          kpis["Prev7_CPL"],
-                    "Last7_Cost":         kpis["Last7_Cost"],
-                    "Last7_Conversions":  kpis["Last7_Conversions"],
-                    "Trend":              kpis["Trend"],
-                    "Current_Pct":        kpis["Current_Pct"],
-                    "Forecast_Avg_CPL":   kpis["Forecast_Avg_CPL"],
-                    "Forecast_Pct":       kpis["Forecast_Pct"],
-                    "Forecast_Direction": kpis["Forecast_Direction"],
-                    "MAPE":               kpis["MAPE"],
-                    "Reliability":        kpis["Reliability"],
-                })
+            results.append({
+                "Date":               str(row["ds"].date()),
+                "Account":            account,
+                "Actual_CPL":         None,
+                "Forecast_CPL":       round(row["yhat"], 4),
+                "Lower_CI":           round(row["yhat_lower"], 4),
+                "Upper_CI":           round(row["yhat_upper"], 4),
+                "Last7_CPL":          kpis["Last7_CPL"],
+                "Prev7_CPL":          kpis["Prev7_CPL"],
+                "Last7_Cost":         kpis["Last7_Cost"],
+                "Last7_Conversions":  kpis["Last7_Conversions"],
+                "Trend":              kpis["Trend"],
+                "Current_Pct":        kpis["Current_Pct"],
+                "Forecast_Avg_CPL":   kpis["Forecast_Avg_CPL"],
+                "Forecast_Pct":       kpis["Forecast_Pct"],
+                "Forecast_Direction": kpis["Forecast_Direction"],
+                "MAPE":               kpis["MAPE"],
+                "Reliability":        kpis["Reliability"],
+            })
 
     # =========================================
     # RUN ALL ACCOUNTS COMBINED
@@ -384,9 +366,6 @@ def run_prophet_forecast(df):
             results.append({
                 "Date":               str(row["ds"].date()),
                 "Account":            "All Accounts Combined",
-                "Campaign_ID":        "ALL",
-                "Cost":               None,
-                "Conversions":        None,
                 "Actual_CPL":         None,
                 "Forecast_CPL":       round(row["yhat"], 4),
                 "Lower_CI":           round(row["yhat_lower"], 4),
@@ -410,20 +389,15 @@ def run_prophet_forecast(df):
         print(f"  Combined forecast error: {e}")
 
     # =========================================
-    # HISTORICAL ACTUALS — one row per campaign
-    # Includes Cost + Conversions so Power BI
-    # can calculate CPL = SUM(Cost)/SUM(Conv)
+    # HISTORICAL ACTUALS — per account
     # =========================================
-    actual_table = camp_filtered.rename(columns={
+    actual_table = df_filtered[["data_date", "account_name", "cpl"]].copy()
+    actual_table = actual_table.rename(columns={
         "data_date":    "Date",
         "account_name": "Account",
-        "campaign_id":  "Campaign_ID",
-        "cost":         "Cost",
-        "conversions":  "Conversions"
-    }).copy()
-    actual_table["Date"]       = actual_table["Date"].astype(str)
-    actual_table["Actual_CPL"] = actual_table["Cost"] / actual_table["Conversions"]
-
+        "cpl":          "Actual_CPL"
+    })
+    actual_table["Date"] = actual_table["Date"].astype(str)
     for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
                 "Last7_Cost", "Last7_Conversions", "Trend", "Current_Pct",
                 "Forecast_Avg_CPL", "Forecast_Pct", "Forecast_Direction",
@@ -434,12 +408,9 @@ def run_prophet_forecast(df):
     # HISTORICAL ACTUALS — all combined
     # =========================================
     portfolio_hist = portfolio_daily.copy()
-    portfolio_hist["Account"]     = "All Accounts Combined"
-    portfolio_hist["Campaign_ID"] = "ALL"
-    portfolio_hist["Cost"]        = portfolio_hist["cost"]
-    portfolio_hist["Conversions"] = portfolio_hist["conversions"]
-    portfolio_hist["Actual_CPL"]  = portfolio_hist["cost"] / portfolio_hist["conversions"]
-    portfolio_hist["Date"]        = portfolio_hist["data_date"].astype(str)
+    portfolio_hist["Account"]    = "All Accounts Combined"
+    portfolio_hist["Actual_CPL"] = portfolio_hist["cost"] / portfolio_hist["conversions"]
+    portfolio_hist["Date"]       = portfolio_hist["data_date"].astype(str)
     for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
                 "Last7_Cost", "Last7_Conversions", "Trend", "Current_Pct",
                 "Forecast_Avg_CPL", "Forecast_Pct", "Forecast_Direction",
@@ -452,12 +423,10 @@ def run_prophet_forecast(df):
     # =========================================
     forecast_df = pd.DataFrame(results)
     final_table = pd.concat([actual_table, portfolio_hist, forecast_df], ignore_index=True)
-    final_table = final_table.sort_values(["Account", "Campaign_ID", "Date"]).reset_index(drop=True)
+    final_table = final_table.sort_values(["Account", "Date"]).reset_index(drop=True)
 
     col_order = [
-        "Date", "Account", "Campaign_ID",
-        "Cost", "Conversions", "Actual_CPL",
-        "Forecast_CPL", "Lower_CI", "Upper_CI",
+        "Date", "Account", "Actual_CPL", "Forecast_CPL", "Lower_CI", "Upper_CI",
         "Last7_CPL", "Prev7_CPL", "Last7_Cost", "Last7_Conversions",
         "Trend", "Current_Pct", "Forecast_Avg_CPL", "Forecast_Pct",
         "Forecast_Direction", "MAPE", "Reliability"
@@ -510,11 +479,14 @@ def write_to_sheet(sh, tab_name, df):
 # MAIN
 # =========================================
 def main():
+    # Step 1: Pull Google Ads data
     ads_df = pull_ads_data()
 
+    # Step 2: Run Prophet forecast
     print("\nRunning Prophet forecast...")
     forecast_df = run_prophet_forecast(ads_df)
 
+    # Step 3: Write to Google Sheets
     print("\nConnecting to Google Sheets...")
     gc = get_sheets_client()
     sh = gc.open_by_key(SHEET_ID)
@@ -525,6 +497,7 @@ def main():
     if not forecast_df.empty:
         write_to_sheet(sh, "Forecast", forecast_df)
 
+    # RunLog
     try:
         log = sh.worksheet("RunLog")
     except Exception:
