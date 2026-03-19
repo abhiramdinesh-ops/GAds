@@ -34,11 +34,20 @@ MCC_IDS = [
     "8567995305"
 ]
 
+SKIPPABLE_STATUSES = {'CANCELED', 'CLOSED'}
+
 end_date   = datetime.today()
 start_date = end_date - timedelta(days=60)
 START_STR  = start_date.strftime("%Y-%m-%d")
 END_STR    = end_date.strftime("%Y-%m-%d")
 
+# =========================================
+# QUERIES
+# Fixed:
+# - Removed metrics.impressions > 0 (was hiding historical paused/suspended data)
+# - Removed campaign.status != 'REMOVED' (removed campaigns still have valid spend)
+# - Added metrics.cost_micros > 0 (only pull rows where money was spent)
+# =========================================
 QUERY = f"""
     SELECT
         campaign.id,
@@ -57,11 +66,13 @@ QUERY = f"""
         metrics.all_conversions
     FROM campaign
     WHERE segments.date BETWEEN '{START_STR}' AND '{END_STR}'
-      AND metrics.impressions > 0
-      AND campaign.status != 'REMOVED'
+      AND metrics.cost_micros > 0
     ORDER BY segments.date DESC
 """
 
+# Fixed:
+# - Removed level = 1 filter (was missing suspended accounts with historical data)
+# - Removed status = 'ENABLED' filter (suspended accounts like O|A GPT PCP 2 have valid data)
 CHILDREN_QUERY = """
     SELECT
         customer_client.id,
@@ -70,12 +81,10 @@ CHILDREN_QUERY = """
         customer_client.status,
         customer_client.level
     FROM customer_client
-    WHERE customer_client.level = 1
-      AND customer_client.status = 'ENABLED'
 """
 
 # =========================================
-# GOOGLE ADS PULL
+# GOOGLE ADS CLIENT
 # =========================================
 def get_ads_client(mcc_id):
     return GoogleAdsClient.load_from_dict({
@@ -87,10 +96,14 @@ def get_ads_client(mcc_id):
         "use_proto_plus":    True,
     })
 
+# =========================================
+# GOOGLE ADS PULL
+# =========================================
 def pull_ads_data():
     print(f"Starting Ads pull: {datetime.now()}")
     print(f"Date range: {START_STR} to {END_STR}")
     all_rows = []
+    summary  = []
 
     for mcc_id in MCC_IDS:
         print(f"\nMCC: {mcc_id}")
@@ -98,20 +111,45 @@ def pull_ads_data():
             client  = get_ads_client(mcc_id)
             service = client.get_service("GoogleAdsService")
 
+            # Get ALL children with no filters
             children = []
             response = service.search(customer_id=mcc_id, query=CHILDREN_QUERY)
             for row in response:
-                if not row.customer_client.manager:
+                c = row.customer_client
+                # Skip the MCC itself (level 0) and manager accounts
+                if c.level > 0 and not c.manager:
                     children.append({
-                        "id":   str(row.customer_client.id),
-                        "name": row.customer_client.descriptive_name
+                        "id":     str(c.id),
+                        "name":   c.descriptive_name,
+                        "status": c.status.name,
+                        "level":  c.level
                     })
+
             print(f"  Found {len(children)} child accounts")
 
+            if len(children) == 0:
+                print("  WARNING: No child accounts found for this MCC")
+                summary.append({
+                    "MCC": mcc_id, "Account": "N/A", "ID": "N/A",
+                    "Rows": 0, "Status": "NO CHILDREN FOUND"
+                })
+                continue
+
             for child in children:
-                cid  = child["id"]
-                name = child["name"]
-                print(f"  -> {name} ({cid})", end=" ")
+                cid    = child["id"]
+                name   = child["name"]
+                status = child["status"]
+
+                # Skip CANCELED and CLOSED — Google blocks API access entirely
+                if status in SKIPPABLE_STATUSES:
+                    print(f"  -> Skipping {name} ({cid}) [{status}]")
+                    summary.append({
+                        "MCC": mcc_id, "Account": name, "ID": cid,
+                        "Rows": 0, "Status": f"SKIPPED ({status})"
+                    })
+                    continue
+
+                print(f"  -> {name} ({cid}) [{status}]", end=" ")
                 try:
                     resp  = service.search(customer_id=cid, query=QUERY)
                     count = 0
@@ -141,15 +179,33 @@ def pull_ads_data():
                         })
                         count += 1
                     print(f"- {count} rows")
+                    summary.append({
+                        "MCC": mcc_id, "Account": name, "ID": cid,
+                        "Rows": count, "Status": "OK"
+                    })
+
                 except Exception as e:
-                    print(f"- SKIPPED: {e}")
+                    print(f"- SKIPPED: {type(e).__name__}: {str(e)[:150]}")
+                    summary.append({
+                        "MCC": mcc_id, "Account": name, "ID": cid,
+                        "Rows": 0, "Status": f"FAILED: {type(e).__name__}"
+                    })
 
         except Exception as e:
-            print(f"  ERROR: {e}")
+            print(f"  ERROR: {type(e).__name__}: {e}")
+            summary.append({
+                "MCC": mcc_id, "Account": "N/A", "ID": "N/A",
+                "Rows": 0, "Status": f"MCC ERROR: {type(e).__name__}"
+            })
 
     df = pd.DataFrame(all_rows)
     print(f"\nTotal rows fetched: {len(df)}")
-    return df
+
+    if not df.empty:
+        print("\n--- Rows and Cost per Account ---")
+        print(df.groupby(["MCC_ID", "Account_Name"])["Cost"].agg(["count","sum"]).round(2).to_string())
+
+    return df, pd.DataFrame(summary)
 
 # =========================================
 # PROPHET FORECASTING
@@ -165,38 +221,31 @@ def run_prophet_forecast(df):
         print("No data for forecasting.")
         return pd.DataFrame()
 
-    # Aggregate to ACCOUNT + date level (not campaign level)
     df_agg = df.copy()
     df_agg["data_date"]    = pd.to_datetime(df_agg["Date"])
     df_agg["cost"]         = df_agg["Cost"]
     df_agg["conversions"]  = df_agg["Conversions"]
-    df_agg["account_name"] = df_agg["Account_Name"]  # <-- use Account_Name
+    df_agg["account_name"] = df_agg["Account_Name"]
 
     df_agg = df_agg.groupby(["data_date", "account_name"]).agg(
         cost=("cost", "sum"),
         conversions=("conversions", "sum")
     ).reset_index()
 
-    # Exclude today (partial data)
     today          = pd.Timestamp.now().normalize()
     df_agg         = df_agg[df_agg["data_date"] < today]
     reference_date = df_agg["data_date"].max()
 
-    # Keep last 60 days
     cutoff = reference_date - pd.Timedelta(days=59)
     df_agg = df_agg[df_agg["data_date"] >= cutoff]
 
-    # Raw for KPIs
-    df_raw = df_agg.copy()
-
-    # Filter for Prophet training
+    df_raw      = df_agg.copy()
     df_filtered = df_agg[df_agg["conversions"] > 0].copy()
     df_filtered["cpl"] = df_filtered["cost"] / df_filtered["conversions"]
 
     print(f"\nReference date: {reference_date.date()}")
     print(f"After cleaning: {df_filtered.shape}")
 
-    # Date windows
     last7_start = reference_date - pd.Timedelta(days=6)
     prev7_start = reference_date - pd.Timedelta(days=13)
     prev7_end   = reference_date - pd.Timedelta(days=7)
@@ -206,7 +255,6 @@ def run_prophet_forecast(df):
         daily_df = daily_df.sort_values("data_date").copy()
         daily_df["cpl"] = daily_df["cost"] / daily_df["conversions"]
 
-        # IQR capping
         Q1    = daily_df["cpl"].quantile(0.25)
         Q3    = daily_df["cpl"].quantile(0.75)
         IQR   = Q3 - Q1
@@ -234,7 +282,6 @@ def run_prophet_forecast(df):
         forecast["yhat_lower"] = np.exp(forecast["yhat_lower"])
         forecast["yhat_upper"] = np.exp(forecast["yhat_upper"])
 
-        # MAPE on last 7 days
         actual_window = daily_df[daily_df["data_date"] >= last7_start]
         forecast_hist = forecast[
             (forecast["ds"] >= last7_start) &
@@ -254,7 +301,6 @@ def run_prophet_forecast(df):
         elif mape < 35:       reliability = "Medium"
         else:                 reliability = "Low"
 
-        # KPIs from raw data
         kpi_df     = kpi_df.sort_values("data_date").copy()
         last7      = kpi_df[kpi_df["data_date"] >= last7_start]
         prev7      = kpi_df[
@@ -310,9 +356,6 @@ def run_prophet_forecast(df):
 
         return forecast_future, kpis
 
-    # =========================================
-    # RUN PER ACCOUNT
-    # =========================================
     results  = []
     accounts = df_filtered["account_name"].unique()
 
@@ -351,9 +394,6 @@ def run_prophet_forecast(df):
                 "Reliability":        kpis["Reliability"],
             })
 
-    # =========================================
-    # RUN ALL ACCOUNTS COMBINED
-    # =========================================
     print("Forecasting: All Accounts Combined")
     portfolio_daily     = df_filtered.groupby("data_date").agg(
         cost=("cost", "sum"), conversions=("conversions", "sum")).reset_index()
@@ -388,9 +428,6 @@ def run_prophet_forecast(df):
     except Exception as e:
         print(f"  Combined forecast error: {e}")
 
-    # =========================================
-    # HISTORICAL ACTUALS — per account
-    # =========================================
     actual_table = df_filtered[["data_date", "account_name", "cpl"]].copy()
     actual_table = actual_table.rename(columns={
         "data_date":    "Date",
@@ -404,9 +441,6 @@ def run_prophet_forecast(df):
                 "MAPE", "Reliability"]:
         actual_table[col] = None
 
-    # =========================================
-    # HISTORICAL ACTUALS — all combined
-    # =========================================
     portfolio_hist = portfolio_daily.copy()
     portfolio_hist["Account"]    = "All Accounts Combined"
     portfolio_hist["Actual_CPL"] = portfolio_hist["cost"] / portfolio_hist["conversions"]
@@ -418,9 +452,6 @@ def run_prophet_forecast(df):
         portfolio_hist[col] = None
     portfolio_hist = portfolio_hist.drop(columns=["cost", "conversions", "data_date"])
 
-    # =========================================
-    # COMBINE + FINAL COLUMN ORDER
-    # =========================================
     forecast_df = pd.DataFrame(results)
     final_table = pd.concat([actual_table, portfolio_hist, forecast_df], ignore_index=True)
     final_table = final_table.sort_values(["Account", "Date"]).reset_index(drop=True)
@@ -480,7 +511,7 @@ def write_to_sheet(sh, tab_name, df):
 # =========================================
 def main():
     # Step 1: Pull Google Ads data
-    ads_df = pull_ads_data()
+    ads_df, df_summary = pull_ads_data()
 
     # Step 2: Run Prophet forecast
     print("\nRunning Prophet forecast...")
