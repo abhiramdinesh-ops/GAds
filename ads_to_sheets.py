@@ -209,7 +209,7 @@ def pull_ads_data():
     return df, pd.DataFrame(summary)
 
 # =========================================
-# PROPHET FORECASTING
+# PROPHET FORECASTING (Updated to match Taboola structure)
 # =========================================
 def run_prophet_forecast(df):
     try:
@@ -227,8 +227,10 @@ def run_prophet_forecast(df):
     df_agg["cost"]         = df_agg["Cost"]
     df_agg["conversions"]  = df_agg["Conversions"]
     df_agg["account_name"] = df_agg["Account_Name"]
+    df_agg["account_id"]   = df_agg["Account_ID"]
 
-    df_agg = df_agg.groupby(["data_date", "account_name"]).agg(
+    # AGGREGATE TO ACCOUNT LEVEL (matching Taboola structure)
+    df_agg = df_agg.groupby(["data_date", "account_name", "account_id"]).agg(
         cost=("cost", "sum"),
         conversions=("conversions", "sum")
     ).reset_index()
@@ -251,6 +253,24 @@ def run_prophet_forecast(df):
     prev7_start = reference_date - pd.Timedelta(days=13)
     prev7_end   = reference_date - pd.Timedelta(days=7)
     next7_end   = reference_date + pd.Timedelta(days=7)
+
+    def fit_prophet_series(daily_df, value_col, log_transform=True):
+        pdf = daily_df[["data_date", value_col]].rename(columns={"data_date": "ds", value_col: "y"})
+        pdf = pdf[pdf["y"] > 0].copy()
+        if log_transform: 
+            pdf["y"] = np.log(pdf["y"])
+        model = Prophet(
+            yearly_seasonality=False,
+            weekly_seasonality=True,
+            daily_seasonality=False,
+            interval_width=0.8
+        )
+        model.fit(pdf)
+        forecast = model.predict(model.make_future_dataframe(periods=7))
+        if log_transform:
+            for c in ["yhat", "yhat_lower", "yhat_upper"]: 
+                forecast[c] = np.exp(forecast[c])
+        return forecast
 
     def run_prophet(daily_df, kpi_df):
         daily_df = daily_df.sort_values("data_date").copy()
@@ -282,6 +302,10 @@ def run_prophet_forecast(df):
         forecast["yhat"]       = np.exp(forecast["yhat"])
         forecast["yhat_lower"] = np.exp(forecast["yhat_lower"])
         forecast["yhat_upper"] = np.exp(forecast["yhat_upper"])
+
+        # Forecast cost and conversions separately (new)
+        cost_f = fit_prophet_series(daily_df, "cost")
+        conv_f = fit_prophet_series(daily_df, "conversions")
 
         actual_window = daily_df[daily_df["data_date"] >= last7_start]
         forecast_hist = forecast[
@@ -346,6 +370,8 @@ def run_prophet_forecast(df):
             "Prev7_CPL":          round(prev7_cpl, 4) if prev7_cpl else None,
             "Last7_Cost":         round(last7_cost, 2),
             "Last7_Conversions":  int(last7_conv),
+            "Prev7_Cost":         round(prev7_cost, 2),
+            "Prev7_Conversions":  int(prev7_conv),
             "Trend":              trend,
             "Current_Pct":        round(current_pct, 2) if current_pct else None,
             "Forecast_Avg_CPL":   round(forecast_avg_cpl, 4),
@@ -355,45 +381,63 @@ def run_prophet_forecast(df):
             "Reliability":        reliability,
         }
 
-        return forecast_future, kpis
+        # Return cost and conv forecasts as well
+        return forecast_future, kpis, cost_f[cost_f["ds"] > reference_date], conv_f[conv_f["ds"] > reference_date]
 
     results  = []
-    accounts = df_filtered["account_name"].unique()
+    accounts = df_filtered[["account_name", "account_id"]].drop_duplicates()
 
-    for account in accounts:
-        account_df     = df_filtered[df_filtered["account_name"] == account].copy()
-        account_kpi_df = df_raw[df_raw["account_name"] == account].copy()
+    for _, acct_row in accounts.iterrows():
+        account = acct_row["account_name"]
+        aid = acct_row["account_id"]
+        account_df     = df_filtered[df_filtered["account_id"] == aid].copy()
+        account_kpi_df = df_raw[df_raw["account_id"] == aid].copy()
         if len(account_df) < 14:
             print(f"Skipping {account} - not enough data ({len(account_df)} days)")
             continue
 
         print(f"Forecasting: {account}")
         try:
-            forecast_future, kpis = run_prophet(account_df, account_kpi_df)
+            forecast_future, kpis, cost_forecast, conv_forecast = run_prophet(account_df, account_kpi_df)
+            
+            # Create lookup dictionaries for cost and conv forecasts
+            cost_map = cost_forecast.set_index("ds")["yhat"].to_dict()
+            conv_map = conv_forecast.set_index("ds")["yhat"].to_dict()
+            
+            # Get the last date for conditional KPI population
+            last_ds = forecast_future["ds"].max()
+            
+            for _, row in forecast_future.iterrows():
+                is_last = (row["ds"] == last_ds)
+                results.append({
+                    "Date":               str(row["ds"].date()),
+                    "Account":            account,
+                    "Account_ID":         aid,
+                    "Actual_CPL":         None,
+                    "Actual_Spend":       None,
+                    "Actual_Conversions": None,
+                    "Forecast_CPL":       round(row["yhat"], 4),
+                    "Lower_CI":           round(row["yhat_lower"], 4),
+                    "Upper_CI":           round(row["yhat_upper"], 4),
+                    "Forecast_Cost":      round(cost_map.get(row["ds"], 0), 2),
+                    "Forecast_Conv":      round(conv_map.get(row["ds"], 0), 2),
+                    "Last7_CPL":          kpis["Last7_CPL"] if is_last else None,
+                    "Prev7_CPL":          kpis["Prev7_CPL"] if is_last else None,
+                    "Last7_Cost":         kpis["Last7_Cost"] if is_last else None,
+                    "Last7_Conversions":  kpis["Last7_Conversions"] if is_last else None,
+                    "Prev7_Cost":         kpis["Prev7_Cost"] if is_last else None,
+                    "Prev7_Conversions":  kpis["Prev7_Conversions"] if is_last else None,
+                    "Trend":              kpis["Trend"] if is_last else None,
+                    "Current_Pct":        kpis["Current_Pct"] if is_last else None,
+                    "Forecast_Avg_CPL":   kpis["Forecast_Avg_CPL"] if is_last else None,
+                    "Forecast_Pct":       kpis["Forecast_Pct"] if is_last else None,
+                    "Forecast_Direction": kpis["Forecast_Direction"] if is_last else None,
+                    "MAPE":               kpis["MAPE"] if is_last else None,
+                    "Reliability":        kpis["Reliability"] if is_last else None,
+                })
         except Exception as e:
             print(f"  Error: {e}")
             continue
-
-        for _, row in forecast_future.iterrows():
-            results.append({
-                "Date":               str(row["ds"].date()),
-                "Account":            account,
-                "Actual_CPL":         None,
-                "Forecast_CPL":       round(row["yhat"], 4),
-                "Lower_CI":           round(row["yhat_lower"], 4),
-                "Upper_CI":           round(row["yhat_upper"], 4),
-                "Last7_CPL":          kpis["Last7_CPL"],
-                "Prev7_CPL":          kpis["Prev7_CPL"],
-                "Last7_Cost":         kpis["Last7_Cost"],
-                "Last7_Conversions":  kpis["Last7_Conversions"],
-                "Trend":              kpis["Trend"],
-                "Current_Pct":        kpis["Current_Pct"],
-                "Forecast_Avg_CPL":   kpis["Forecast_Avg_CPL"],
-                "Forecast_Pct":       kpis["Forecast_Pct"],
-                "Forecast_Direction": kpis["Forecast_Direction"],
-                "MAPE":               kpis["MAPE"],
-                "Reliability":        kpis["Reliability"],
-            })
 
     print("Forecasting: All Accounts Combined")
     portfolio_daily     = df_filtered.groupby("data_date").agg(
@@ -402,26 +446,39 @@ def run_prophet_forecast(df):
         cost=("cost", "sum"), conversions=("conversions", "sum")).reset_index()
 
     try:
-        forecast_future, kpis = run_prophet(portfolio_daily, portfolio_daily_raw)
+        forecast_future, kpis, cost_forecast, conv_forecast = run_prophet(portfolio_daily, portfolio_daily_raw)
+        
+        cost_map = cost_forecast.set_index("ds")["yhat"].to_dict()
+        conv_map = conv_forecast.set_index("ds")["yhat"].to_dict()
+        last_ds = forecast_future["ds"].max()
+        
         for _, row in forecast_future.iterrows():
+            is_last = (row["ds"] == last_ds)
             results.append({
                 "Date":               str(row["ds"].date()),
                 "Account":            "All Accounts Combined",
+                "Account_ID":         "ALL",
                 "Actual_CPL":         None,
+                "Actual_Spend":       None,
+                "Actual_Conversions": None,
                 "Forecast_CPL":       round(row["yhat"], 4),
                 "Lower_CI":           round(row["yhat_lower"], 4),
                 "Upper_CI":           round(row["yhat_upper"], 4),
-                "Last7_CPL":          kpis["Last7_CPL"],
-                "Prev7_CPL":          kpis["Prev7_CPL"],
-                "Last7_Cost":         kpis["Last7_Cost"],
-                "Last7_Conversions":  kpis["Last7_Conversions"],
-                "Trend":              kpis["Trend"],
-                "Current_Pct":        kpis["Current_Pct"],
-                "Forecast_Avg_CPL":   kpis["Forecast_Avg_CPL"],
-                "Forecast_Pct":       kpis["Forecast_Pct"],
-                "Forecast_Direction": kpis["Forecast_Direction"],
-                "MAPE":               kpis["MAPE"],
-                "Reliability":        kpis["Reliability"],
+                "Forecast_Cost":      round(cost_map.get(row["ds"], 0), 2),
+                "Forecast_Conv":      round(conv_map.get(row["ds"], 0), 2),
+                "Last7_CPL":          kpis["Last7_CPL"] if is_last else None,
+                "Prev7_CPL":          kpis["Prev7_CPL"] if is_last else None,
+                "Last7_Cost":         kpis["Last7_Cost"] if is_last else None,
+                "Last7_Conversions":  kpis["Last7_Conversions"] if is_last else None,
+                "Prev7_Cost":         kpis["Prev7_Cost"] if is_last else None,
+                "Prev7_Conversions":  kpis["Prev7_Conversions"] if is_last else None,
+                "Trend":              kpis["Trend"] if is_last else None,
+                "Current_Pct":        kpis["Current_Pct"] if is_last else None,
+                "Forecast_Avg_CPL":   kpis["Forecast_Avg_CPL"] if is_last else None,
+                "Forecast_Pct":       kpis["Forecast_Pct"] if is_last else None,
+                "Forecast_Direction": kpis["Forecast_Direction"] if is_last else None,
+                "MAPE":               kpis["MAPE"] if is_last else None,
+                "Reliability":        kpis["Reliability"] if is_last else None,
             })
         print(f"  Combined forecast CPL: ${kpis['Forecast_Avg_CPL']:.2f}")
         print(f"  Combined last 7 CPL:   ${kpis['Last7_CPL']:.2f}")
@@ -429,25 +486,35 @@ def run_prophet_forecast(df):
     except Exception as e:
         print(f"  Combined forecast error: {e}")
 
-    actual_table = df_filtered[["data_date", "account_name", "cpl"]].copy()
+    # Build historical actual data table with new columns
+    actual_table = df_filtered.copy()
     actual_table = actual_table.rename(columns={
         "data_date":    "Date",
         "account_name": "Account",
+        "account_id":   "Account_ID",
+        "cost":         "Actual_Spend",
+        "conversions":  "Actual_Conversions",
         "cpl":          "Actual_CPL"
     })
     actual_table["Date"] = actual_table["Date"].astype(str)
-    for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
-                "Last7_Cost", "Last7_Conversions", "Trend", "Current_Pct",
+    for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Forecast_Cost", "Forecast_Conv",
+                "Last7_CPL", "Prev7_CPL", "Last7_Cost", "Last7_Conversions",
+                "Prev7_Cost", "Prev7_Conversions", "Trend", "Current_Pct",
                 "Forecast_Avg_CPL", "Forecast_Pct", "Forecast_Direction",
                 "MAPE", "Reliability"]:
         actual_table[col] = None
 
+    # Portfolio historical with new columns
     portfolio_hist = portfolio_daily.copy()
-    portfolio_hist["Account"]    = "All Accounts Combined"
-    portfolio_hist["Actual_CPL"] = portfolio_hist["cost"] / portfolio_hist["conversions"]
-    portfolio_hist["Date"]       = portfolio_hist["data_date"].astype(str)
-    for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Last7_CPL", "Prev7_CPL",
-                "Last7_Cost", "Last7_Conversions", "Trend", "Current_Pct",
+    portfolio_hist["Account"]            = "All Accounts Combined"
+    portfolio_hist["Account_ID"]         = "ALL"
+    portfolio_hist["Actual_CPL"]         = portfolio_hist["cost"] / portfolio_hist["conversions"]
+    portfolio_hist["Actual_Spend"]       = portfolio_hist["cost"]
+    portfolio_hist["Actual_Conversions"] = portfolio_hist["conversions"]
+    portfolio_hist["Date"]               = portfolio_hist["data_date"].astype(str)
+    for col in ["Forecast_CPL", "Lower_CI", "Upper_CI", "Forecast_Cost", "Forecast_Conv",
+                "Last7_CPL", "Prev7_CPL", "Last7_Cost", "Last7_Conversions",
+                "Prev7_Cost", "Prev7_Conversions", "Trend", "Current_Pct",
                 "Forecast_Avg_CPL", "Forecast_Pct", "Forecast_Direction",
                 "MAPE", "Reliability"]:
         portfolio_hist[col] = None
@@ -457,9 +524,12 @@ def run_prophet_forecast(df):
     final_table = pd.concat([actual_table, portfolio_hist, forecast_df], ignore_index=True)
     final_table = final_table.sort_values(["Account", "Date"]).reset_index(drop=True)
 
+    # Updated column order to match Taboola structure
     col_order = [
-        "Date", "Account", "Actual_CPL", "Forecast_CPL", "Lower_CI", "Upper_CI",
-        "Last7_CPL", "Prev7_CPL", "Last7_Cost", "Last7_Conversions",
+        "Date", "Account", "Account_ID", "Actual_CPL", "Actual_Spend", "Actual_Conversions",
+        "Forecast_CPL", "Lower_CI", "Upper_CI", "Forecast_Cost", "Forecast_Conv",
+        "Last7_CPL", "Prev7_CPL", "Last7_Cost", "Last7_Conversions", 
+        "Prev7_Cost", "Prev7_Conversions",
         "Trend", "Current_Pct", "Forecast_Avg_CPL", "Forecast_Pct",
         "Forecast_Direction", "MAPE", "Reliability"
     ]
