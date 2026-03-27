@@ -1,6 +1,9 @@
-google-ads
-gspread
-google-auth
+requests
 pandas
 numpy
+gspread
+google-auth
+google-ads
 prophet
+statsmodels
+pytz
