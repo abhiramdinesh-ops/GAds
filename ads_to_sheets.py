@@ -6,6 +6,7 @@ from google.ads.googleads.client import GoogleAdsClient
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from datetime import datetime, timedelta
+import pytz
 import logging
 logging.getLogger("prophet").setLevel(logging.ERROR)
 logging.getLogger("cmdstanpy").setLevel(logging.ERROR)
@@ -41,6 +42,22 @@ end_date   = datetime.today()
 start_date = end_date - timedelta(days=60)
 START_STR  = start_date.strftime("%Y-%m-%d")
 END_STR    = end_date.strftime("%Y-%m-%d")
+
+# =========================================
+# LOGGING
+# =========================================
+
+pipeline_logs = []
+
+def log_message(level, message):
+    """Add a log entry with GMT timestamp"""
+    gmt_time = datetime.now(pytz.UTC).strftime("%Y-%m-%d %H:%M:%S")
+    pipeline_logs.append({
+        "Timestamp": gmt_time,
+        "Level": level,
+        "Message": message
+    })
+    print(f"[{gmt_time}] {level}: {message}")
 
 # =========================================
 # QUERIES
@@ -101,13 +118,14 @@ def get_ads_client(mcc_id):
 # GOOGLE ADS PULL
 # =========================================
 def pull_ads_data():
-    print(f"Starting Ads pull: {datetime.now()}")
-    print(f"Date range: {START_STR} to {END_STR}")
+    log_message("INFO", f"Starting Google Ads data pull (Date range: {START_STR} to {END_STR})")
+    log_message("INFO", f"Processing {len(MCC_IDS)} MCC accounts")
+    
     all_rows = []
     summary  = []
 
     for mcc_id in MCC_IDS:
-        print(f"\nMCC: {mcc_id}")
+        log_message("INFO", f"Processing MCC: {mcc_id}")
         try:
             client  = get_ads_client(mcc_id)
             service = client.get_service("GoogleAdsService")
@@ -126,10 +144,10 @@ def pull_ads_data():
                         "level":  c.level
                     })
 
-            print(f"  Found {len(children)} child accounts")
+            log_message("INFO", f"MCC {mcc_id}: Found {len(children)} child accounts")
 
             if len(children) == 0:
-                print("  WARNING: No child accounts found for this MCC")
+                log_message("WARNING", f"MCC {mcc_id}: No child accounts found")
                 summary.append({
                     "MCC": mcc_id, "Account": "N/A", "ID": "N/A",
                     "Rows": 0, "Status": "NO CHILDREN FOUND"
@@ -143,14 +161,13 @@ def pull_ads_data():
 
                 # Skip CANCELED and CLOSED — Google blocks API access entirely
                 if status in SKIPPABLE_STATUSES:
-                    print(f"  -> Skipping {name} ({cid}) [{status}]")
+                    log_message("INFO", f"Account '{name}' ({cid}): Skipped [{status}]")
                     summary.append({
                         "MCC": mcc_id, "Account": name, "ID": cid,
                         "Rows": 0, "Status": f"SKIPPED ({status})"
                     })
                     continue
 
-                print(f"  -> {name} ({cid}) [{status}]", end=" ")
                 try:
                     resp  = service.search(customer_id=cid, query=QUERY)
                     count = 0
@@ -179,32 +196,35 @@ def pull_ads_data():
                             "ROAS":          round(conv_value / cost, 2) if cost > 0 else 0
                         })
                         count += 1
-                    print(f"- {count} rows")
+                    
+                    log_message("INFO", f"Account '{name}' ({cid}): Retrieved {count} rows")
                     summary.append({
                         "MCC": mcc_id, "Account": name, "ID": cid,
                         "Rows": count, "Status": "OK"
                     })
 
                 except Exception as e:
-                    print(f"- SKIPPED: {type(e).__name__}: {str(e)[:150]}")
+                    error_msg = f"{type(e).__name__}: {str(e)[:100]}"
+                    log_message("ERROR", f"Account '{name}' ({cid}): {error_msg}")
                     summary.append({
                         "MCC": mcc_id, "Account": name, "ID": cid,
                         "Rows": 0, "Status": f"FAILED: {type(e).__name__}"
                     })
 
         except Exception as e:
-            print(f"  ERROR: {type(e).__name__}: {e}")
+            error_msg = f"{type(e).__name__}: {str(e)[:100]}"
+            log_message("ERROR", f"MCC {mcc_id}: {error_msg}")
             summary.append({
                 "MCC": mcc_id, "Account": "N/A", "ID": "N/A",
                 "Rows": 0, "Status": f"MCC ERROR: {type(e).__name__}"
             })
 
     df = pd.DataFrame(all_rows)
-    print(f"\nTotal rows fetched: {len(df)}")
+    log_message("INFO", f"Data pull complete: {len(df)} total rows retrieved")
 
     if not df.empty:
-        print("\n--- Rows and Cost per Account ---")
-        print(df.groupby(["MCC_ID", "Account_Name"])["Cost"].agg(["count","sum"]).round(2).to_string())
+        account_summary = df.groupby(["MCC_ID", "Account_Name"])["Cost"].agg(["count","sum"]).round(2)
+        log_message("INFO", f"Data retrieved from {len(account_summary)} accounts")
 
     return df, pd.DataFrame(summary)
 
@@ -212,14 +232,15 @@ def pull_ads_data():
 # PROPHET FORECASTING (Updated to match Taboola structure)
 # =========================================
 def run_prophet_forecast(df):
+    log_message("INFO", "Starting Prophet forecast generation")
     try:
         from prophet import Prophet
     except ImportError:
-        print("Prophet not installed, skipping forecast.")
+        log_message("ERROR", "Prophet library not available, skipping forecast")
         return pd.DataFrame()
 
     if df.empty:
-        print("No data for forecasting.")
+        log_message("WARNING", "Empty dataframe provided, skipping forecast")
         return pd.DataFrame()
 
     df_agg = df.copy()
@@ -246,8 +267,7 @@ def run_prophet_forecast(df):
     df_filtered = df_agg[df_agg["conversions"] > 0].copy()
     df_filtered["cpl"] = df_filtered["cost"] / df_filtered["conversions"]
 
-    print(f"\nReference date: {reference_date.date()}")
-    print(f"After cleaning: {df_filtered.shape}")
+    log_message("INFO", f"Reference date: {reference_date.date()}, Filtered data: {df_filtered.shape[0]} rows")
 
     last7_start = reference_date - pd.Timedelta(days=6)
     prev7_start = reference_date - pd.Timedelta(days=13)
@@ -386,6 +406,8 @@ def run_prophet_forecast(df):
 
     results  = []
     accounts = df_filtered[["account_name", "account_id"]].drop_duplicates()
+    
+    log_message("INFO", f"Generating forecasts for {len(accounts)} accounts")
 
     for _, acct_row in accounts.iterrows():
         account = acct_row["account_name"]
@@ -393,10 +415,9 @@ def run_prophet_forecast(df):
         account_df     = df_filtered[df_filtered["account_id"] == aid].copy()
         account_kpi_df = df_raw[df_raw["account_id"] == aid].copy()
         if len(account_df) < 14:
-            print(f"Skipping {account} - not enough data ({len(account_df)} days)")
+            log_message("WARNING", f"Account '{account}' ({aid}): Insufficient data ({len(account_df)} days), skipping forecast")
             continue
 
-        print(f"Forecasting: {account}")
         try:
             forecast_future, kpis, cost_forecast, conv_forecast = run_prophet(account_df, account_kpi_df)
             
@@ -435,11 +456,12 @@ def run_prophet_forecast(df):
                     "MAPE":               kpis["MAPE"] if is_last else None,
                     "Reliability":        kpis["Reliability"] if is_last else None,
                 })
+            log_message("INFO", f"Account '{account}' ({aid}): Forecast generated successfully")
         except Exception as e:
-            print(f"  Error: {e}")
+            log_message("ERROR", f"Account '{account}' ({aid}): Forecast failed - {str(e)[:100]}")
             continue
 
-    print("Forecasting: All Accounts Combined")
+    log_message("INFO", "Forecasting: All Accounts Combined")
     portfolio_daily     = df_filtered.groupby("data_date").agg(
         cost=("cost", "sum"), conversions=("conversions", "sum")).reset_index()
     portfolio_daily_raw = df_raw.groupby("data_date").agg(
@@ -480,11 +502,9 @@ def run_prophet_forecast(df):
                 "MAPE":               kpis["MAPE"] if is_last else None,
                 "Reliability":        kpis["Reliability"] if is_last else None,
             })
-        print(f"  Combined forecast CPL: ${kpis['Forecast_Avg_CPL']:.2f}")
-        print(f"  Combined last 7 CPL:   ${kpis['Last7_CPL']:.2f}")
-        print(f"  Combined trend:        {kpis['Trend']}")
+        log_message("INFO", f"Combined forecast generated - CPL: ${kpis['Forecast_Avg_CPL']:.2f}, Trend: {kpis['Trend']}")
     except Exception as e:
-        print(f"  Combined forecast error: {e}")
+        log_message("ERROR", f"Combined forecast failed: {str(e)[:100]}")
 
     # Build historical actual data table with new columns
     actual_table = df_filtered.copy()
@@ -536,13 +556,14 @@ def run_prophet_forecast(df):
     final_table = final_table[col_order]
     final_table = final_table.fillna("")
 
-    print(f"\nForecast table rows: {len(final_table)}")
+    log_message("INFO", f"Forecast table generated: {len(final_table)} rows")
     return final_table
 
 # =========================================
 # GOOGLE SHEETS WRITE
 # =========================================
 def get_sheets_client():
+    log_message("INFO", "Authenticating with Google Sheets")
     creds = Credentials(
         token=None,
         refresh_token=SHEETS_REFRESH_TOKEN,
@@ -555,16 +576,17 @@ def get_sheets_client():
         ]
     )
     creds.refresh(Request())
+    log_message("INFO", "Google Sheets authentication successful")
     return gspread.authorize(creds)
 
 def write_to_sheet(sh, tab_name, df):
     try:
         ws = sh.worksheet(tab_name)
         ws.clear()
-        print(f"Cleared existing {tab_name} tab")
+        log_message("INFO", f"Sheet '{tab_name}': Cleared existing data")
     except Exception:
         ws = sh.add_worksheet(title=tab_name, rows=200000, cols=25)
-        print(f"Created new {tab_name} tab")
+        log_message("INFO", f"Sheet '{tab_name}': Created new worksheet")
 
     if len(df) > 0:
         headers = list(df.columns)
@@ -572,49 +594,94 @@ def write_to_sheet(sh, tab_name, df):
         ws.update([headers])
         for i in range(0, len(data), 5000):
             ws.append_rows(data[i:i+5000], value_input_option="USER_ENTERED")
-            print(f"  {tab_name}: written rows {i+1} to {min(i+5000, len(data))}")
-        print(f"  {tab_name}: {len(df)} total rows written")
+        log_message("INFO", f"Sheet '{tab_name}': Wrote {len(df)} rows")
     else:
-        print(f"  {tab_name}: no data to write")
+        log_message("WARNING", f"Sheet '{tab_name}': No data to write")
+
+def write_logs_to_sheet(sh):
+    """Write logs to sheet, keeping only last 3000 rows"""
+    try:
+        try:
+            ws = sh.worksheet("Logs")
+            # Read existing logs
+            existing_data = ws.get_all_records()
+            existing_logs = pd.DataFrame(existing_data) if existing_data else pd.DataFrame()
+        except:
+            ws = sh.add_worksheet(title="Logs", rows=3500, cols=3)
+            existing_logs = pd.DataFrame()
+            log_message("INFO", "Created new 'Logs' worksheet")
+        
+        # Combine existing and new logs
+        new_logs = pd.DataFrame(pipeline_logs)
+        
+        if not existing_logs.empty and not new_logs.empty:
+            # Ensure columns match
+            if set(new_logs.columns) == set(existing_logs.columns):
+                combined_logs = pd.concat([existing_logs, new_logs], ignore_index=True)
+            else:
+                combined_logs = new_logs
+        elif not new_logs.empty:
+            combined_logs = new_logs
+        else:
+            combined_logs = existing_logs
+        
+        # Keep only last 3000 rows
+        if len(combined_logs) > 3000:
+            combined_logs = combined_logs.tail(3000).reset_index(drop=True)
+        
+        # Write to sheet
+        ws.clear()
+        ws.update([list(combined_logs.columns)])
+        data = combined_logs.fillna("").values.tolist()
+        ws.append_rows(data, value_input_option="USER_ENTERED")
+        
+        print(f"[{datetime.now(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S')}] INFO: Logs sheet updated with {len(combined_logs)} total rows (last 3000 kept)")
+        
+    except Exception as e:
+        print(f"[{datetime.now(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S')}] ERROR: Failed to write logs to sheet - {str(e)}")
 
 # =========================================
 # MAIN
 # =========================================
 def main():
-    # Step 1: Pull Google Ads data
-    ads_df, df_summary = pull_ads_data()
-
-    # Step 2: Run Prophet forecast
-    print("\nRunning Prophet forecast...")
-    forecast_df = run_prophet_forecast(ads_df)
-
-    # Step 3: Write to Google Sheets
-    print("\nConnecting to Google Sheets...")
-    gc = get_sheets_client()
-    sh = gc.open_by_key(SHEET_ID)
-    print(f"Connected to: {sh.title}")
-
-    write_to_sheet(sh, "AdsData", ads_df)
-
-    if not forecast_df.empty:
-        write_to_sheet(sh, "Forecast", forecast_df)
-
-    # RunLog
+    log_message("INFO", "Pipeline execution started")
+    
     try:
-        log = sh.worksheet("RunLog")
-    except Exception:
-        log = sh.add_worksheet(title="RunLog", rows=1000, cols=7)
-        log.append_row(["Timestamp", "Ads Rows", "Forecast Rows", "MCCs", "Accounts", "Status"])
+        # Step 1: Pull Google Ads data
+        ads_df, df_summary = pull_ads_data()
 
-    log.append_row([
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        len(ads_df),
-        len(forecast_df),
-        ", ".join(MCC_IDS),
-        len(set(ads_df["Account_ID"].tolist())) if len(ads_df) > 0 else 0,
-        "Success"
-    ])
-    print("RunLog updated. All done.")
+        # Step 2: Run Prophet forecast
+        forecast_df = run_prophet_forecast(ads_df)
+
+        # Step 3: Write to Google Sheets
+        log_message("INFO", "Connecting to Google Sheets")
+        gc = get_sheets_client()
+        sh = gc.open_by_key(SHEET_ID)
+        log_message("INFO", f"Connected to spreadsheet: {sh.title}")
+
+        write_to_sheet(sh, "AdsData", ads_df)
+
+        if not forecast_df.empty:
+            write_to_sheet(sh, "Forecast", forecast_df)
+        else:
+            log_message("WARNING", "No forecast data generated")
+
+        # Write logs last
+        write_logs_to_sheet(sh)
+        
+        log_message("INFO", "Pipeline execution completed successfully")
+        print("\nAll done! ✓")
+        
+    except Exception as e:
+        log_message("ERROR", f"Pipeline execution failed: {str(e)}")
+        # Still try to write logs even if pipeline fails
+        try:
+            gc = get_sheets_client()
+            sh = gc.open_by_key(SHEET_ID)
+            write_logs_to_sheet(sh)
+        except:
+            pass
+        raise
 
 if __name__ == "__main__":
     main()
