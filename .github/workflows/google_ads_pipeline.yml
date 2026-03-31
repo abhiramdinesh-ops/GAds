@@ -1,32 +1,64 @@
 name: Google Ads to Sheets
 
 on:
- # schedule:
-   # - cron: '0 * * * *'
+  # schedule:
+  #   - cron: '0 * * * *'
   workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run script
+      - name: Run Google Ads Pipeline (with retry)
+        id: run_pipeline
         env:
-          ADS_CLIENT_ID:       ${{ secrets.ADS_CLIENT_ID }}
-          ADS_CLIENT_SECRET:   ${{ secrets.ADS_CLIENT_SECRET }}
-          ADS_REFRESH_TOKEN:   ${{ secrets.ADS_REFRESH_TOKEN }}
-          DEVELOPER_TOKEN:     ${{ secrets.DEVELOPER_TOKEN }}
-          SHEETS_CLIENT_ID:    ${{ secrets.SHEETS_CLIENT_ID }}
+          ADS_CLIENT_ID:        ${{ secrets.ADS_CLIENT_ID }}
+          ADS_CLIENT_SECRET:    ${{ secrets.ADS_CLIENT_SECRET }}
+          ADS_REFRESH_TOKEN:    ${{ secrets.ADS_REFRESH_TOKEN }}
+          DEVELOPER_TOKEN:      ${{ secrets.DEVELOPER_TOKEN }}
+          SHEETS_CLIENT_ID:     ${{ secrets.SHEETS_CLIENT_ID }}
           SHEETS_CLIENT_SECRET: ${{ secrets.SHEETS_CLIENT_SECRET }}
           SHEETS_REFRESH_TOKEN: ${{ secrets.SHEETS_REFRESH_TOKEN }}
-          SHEET_ID:            ${{ secrets.SHEET_ID }}
-        run: python ads_to_sheets.py
+          SHEET_ID:             ${{ secrets.SHEET_ID }}
+        run: |
+          echo "▶️ First attempt..."
+          python ads_to_sheets.py > pipeline.log 2>&1 || (
+            echo "⚠️ First attempt failed. Retrying in 3 minutes..."
+            sleep 180
+            echo "🔁 Second attempt..."
+            python ads_to_sheets.py >> pipeline.log 2>&1
+          )
+
+      - name: Show last logs (always)
+        if: always()
+        run: |
+          echo "📄 Showing last 50 lines of log:"
+          tail -n 50 pipeline.log || echo "No log file found"
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "❌ Google Ads Pipeline FAILED at $(date)"
+          echo "---- ERROR CONTEXT ----"
+          grep -i -A 5 -B 5 "error" pipeline.log || echo "No explicit ERROR found"
